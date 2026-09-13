@@ -1,5 +1,7 @@
 # ReconCheck
 
+![CI](https://github.com/ReconCheck/core/actions/workflows/ci.yml/badge.svg) · Python 3.10+ (Linux / macOS / Windows) · Apache-2.0
+
 **Cross-document verification engine.** Point it at messy invoices, purchase orders and delivery notes. It tells you what doesn't match, by how much, and where in the original file.
 
 把一叠格式混乱的单据拖进去，告诉你哪几处对不上、差多少钱、原文在哪一行。

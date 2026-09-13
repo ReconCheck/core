@@ -112,6 +112,21 @@ Four steps, in this order:
 
 The output is not a risk score. It is a list of specific, checkable claims about your documents.
 
+## Feature overview (this build)
+
+What ships *today* (status details in the [docs](https://github.com/ReconCheck/docs)):
+
+- **Parse** — CSV / TSV / TXT (sniffed delimiters, ragged rows) and XLSX / XLSM (read-only streaming, multi-sheet, optional sheet filter). Encodings: UTF-8, GB18030, UTF-16, Latin-1 — with a plausibility gate so binary junk fails with a clear error instead of parsing as a garbage table.
+- **Align** — exact key matching on `match_on` with normalisation (part numbers, entity suffixes, whitespace); cell-level units (`"5000 g"` → value `5000`, unit `"g"`) survive into the judgement stage.
+- **Judge** — YAML differential rules (relative + absolute tolerance; exceptions: unit conversion `kg↔g`, rounding; severity; `evidence.require: both_sides`) **plus a built-in auto rule as the baseline** that compares every shared numeric column and never double-reports a column an explicit rule covers.
+- **Cite** — every finding carries coordinates on both sides and a `cell://` href into the original file.
+- **CLI** — `reconcheck compare ...` with clean error handling.
+- **REST API** — synchronous compare, async batch jobs (auto-pairing, per-pair progress, failed-pair isolation), document library, stored reports, and user-configured enterprise data sources (probe / list / fetch).
+- **Frontend** — dependency-free static page: drag-and-drop batch upload, comparison results with clickable evidence highlighting the source cell, document library, data-source configuration form.
+- **Ops & security** — 64 MB upload / 50 MB streaming fetch caps, document-id allowlist (path-traversal guard), optional `X-API-Key` auth with a startup warning, atomic persistence, queued-job replay after restart, TTL janitor for uploads/reports (`RECONCHECK_TTL_DAYS`).
+
+Full capability matrix, end-user guide and cross-engine design: [ReconCheck/docs](https://github.com/ReconCheck/docs).
+
 ## Design principles
 
 - **Read-only.** It never writes to your data and never touches your business systems.
@@ -153,6 +168,8 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 它解决的是 ERP 不解决的问题：ERP 负责记账，不负责检查账记的这几份文件之间是否自洽。
 
 > 项目处于早期开发阶段，表格类文件（CSV/TSV/XLSX）的最小闭环已可用，PDF/OCR 解析与实体对齐是下一步。欢迎 Watch / Star 关注进展。
+
+使用方式与功能清单见 [docs 仓库](https://github.com/ReconCheck/docs)：中文《用户使用指南》《功能能力清单》+ 英文 capability list。
 
 ### 为什么先做开源
 

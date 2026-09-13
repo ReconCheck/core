@@ -3,14 +3,17 @@
 Endpoints
 ---------
 * ``GET   /api/health``                 — liveness + engine version
-* ``POST  /api/compare``                — synchronous comparison of two files
-* ``POST  /api/jobs``                   — async batch comparison of many files
+* ``POST  /api/compare``                — synchronous comparison (2 files and/or doc ids)
+* ``POST  /api/jobs``                   — async batch comparison (files + doc ids)
 * ``GET   /api/jobs/{job_id}``          — job status / progress / pair summary
 * ``GET   /api/reports/{report_id}``    — stored comparison report (JSON)
 * ``GET   /api/rules``                  — available rule sets
+* ``GET   /api/documents`` …            — document library (register / list / preview / delete)
+* ``GET   /api/datasources`` …          — enterprise data sources (CRUD / probe / list / fetch)
 
 Authentication (optional): set ``RECONCHECK_API_KEY``. When set, every ``/api/*``
 request must carry ``X-API-Key: <key>`` (the static frontend works without it).
+Data source tokens are stored in the local data directory and never echoed.
 
 Run: ``reconcheck-api`` (binds ``0.0.0.0:8765`` by default).
 """
@@ -29,18 +32,25 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from httpx import HTTPError
 
 from .. import __version__
-from ..comparison import compare_files
+from ..comparison import compare_documents
 from ..errors import ReconCheckError
+from ..models import Document
+from ..parse import load_document
+from ..parse.tabular import document_from_records
+from .datasources import DataSource, load_datasources, save_datasources
+from .store import DocumentStore
 
 STATIC_DIR = Path(__file__).parent / "static"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_RULES_DIR = REPO_ROOT / "examples" / "rules"
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+_PREVIEW_ROWS = 100
 
 
 def _default_rules_dir() -> Path | None:
@@ -158,13 +168,55 @@ def base_key(filename: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# document resolution helpers (records-type docs are JSON -> table on load)
+# ---------------------------------------------------------------------------
+
+
+def _doc_from_meta(docs: DocumentStore, meta: dict[str, Any]) -> Document:
+    if meta["source"] == "records":
+        raw = docs.content(meta["id"]) or b"[]"
+        try:
+            records = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as err:
+            raise ReconCheckError(
+                f"stored records of '{meta['name']}' are corrupt: {err}"
+            ) from err
+        return document_from_records(records, meta["name"])
+    path = docs.content_path(meta["id"], meta)
+    if path is None:
+        raise ReconCheckError(f"content of document '{meta['name']}' is missing")
+    return load_document(path)
+
+
+def _doc_preview(docs: DocumentStore, meta: dict[str, Any]) -> dict[str, Any]:
+    try:
+        doc = _doc_from_meta(docs, meta)
+    except ReconCheckError as err:
+        return {"error": str(err)}
+    if not doc.tables:
+        return {"error": "no table found in this document"}
+    table = doc.tables[0]
+    return {
+        "headers": table.headers[:64],
+        "rows": [
+            [{"text": c.text, "row": c.loc.row, "col": c.loc.col} for c in row.cells]
+            for row in table.rows[:_PREVIEW_ROWS]
+        ],
+        "total_rows": len(table.rows),
+    }
+
+
+# ---------------------------------------------------------------------------
 # backend worker: one thread, one queue
 # ---------------------------------------------------------------------------
 
 
 class Worker:
-    def __init__(self, store: JobStore, rules_dir: Path | None) -> None:
+    def __init__(
+        self, store: JobStore, documents: DocumentStore, rules_dir: Path | None
+    ) -> None:
         self.store = store
+        self.documents = documents
         self.rules_dir = rules_dir
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -197,17 +249,28 @@ class Worker:
                 if job is not None:
                     self.store.update_job(job_id, status="failed", error=str(err))
 
+    def _load_entry(self, entry: dict[str, Any]) -> Document:
+        if entry.get("doc_id"):
+            meta = self.documents.get(entry["doc_id"])
+            if meta is None:
+                raise ReconCheckError(f"document {entry['doc_id']} no longer exists")
+            return _doc_from_meta(self.documents, meta)
+        return load_document(entry["path"])
+
     def _process(self, job_id: str) -> None:
         job = self.store.get_job(job_id)
         if job is None:
             return
         self.store.update_job(job_id, status="running", started_at=time.time())
+        by_name = {entry["name"]: entry for entry in job["files"]}
         pairs = job["pairs"]
         for i, pair in enumerate(pairs):
             try:
-                report, _findings = compare_files(
-                    pair["left_path"],
-                    pair["right_path"],
+                left_doc = self._load_entry(by_name[pair["left"]])
+                right_doc = self._load_entry(by_name[pair["right"]])
+                report, _findings = compare_documents(
+                    left_doc,
+                    right_doc,
                     rules=self.rules_dir,
                     match_on=job["config"].get("match_on"),
                     normalize=job["config"].get("normalize"),
@@ -245,6 +308,13 @@ def _auth_dependency(api_key: str | None):
     return require_key
 
 
+def _require_datasource(store_id: str, sources: list[DataSource]) -> DataSource:
+    for source in sources:
+        if source.id == store_id:
+            return source
+    raise HTTPException(status_code=404, detail="data source not found")
+
+
 def create_app(
     data_dir: str | Path | None = None,
     api_key: str | None = None,
@@ -253,8 +323,9 @@ def create_app(
     root.mkdir(parents=True, exist_ok=True)
     store = JobStore(root)
     store.load()
+    documents = DocumentStore(root)
     rules_dir = _default_rules_dir()
-    worker = Worker(store, rules_dir)
+    worker = Worker(store, documents, rules_dir)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -277,35 +348,57 @@ def create_app(
     def health() -> dict[str, Any]:
         return {"ok": True, "engine": "reconcheck", "version": __version__}
 
+    # ------------------------------------------------------------- compare
     @api.post("/compare")
-    async def compare(files: list[UploadFile] = File(...)) -> JSONResponse:
-        if len(files) != 2:
-            raise HTTPException(status_code=400, detail="exactly two files are required")
-        tmp = root / "tmp" / uuid.uuid4().hex[:8]
-        tmp.mkdir(parents=True, exist_ok=True)
-        paths: list[Path] = []
-        try:
-            for i, upload in enumerate(files):
-                target = tmp / _SAFE_NAME.sub("_", upload.filename or f"file_{i}")
-                with target.open("wb") as out:
-                    while chunk := await upload.read(1024 * 1024):
-                        out.write(chunk)
-                paths.append(target)
-            report, _findings = compare_files(
-                paths[0], paths[1], rules=rules_dir
+    async def compare(
+        files: list[UploadFile] | None = File(default=None),
+        doc_ids: str = Form(""),
+    ) -> JSONResponse:
+        ids = [i.strip() for i in (doc_ids or "").split(",") if i.strip()]
+        if (files or []) and ids:
+            raise HTTPException(
+                status_code=400, detail="pass either files or doc_ids, not both"
             )
+        docs: list[Document] = []
+        for doc_id in ids:
+            meta = documents.get(doc_id)
+            if meta is None:
+                raise HTTPException(status_code=404, detail=f"document {doc_id} not found")
+            docs.append(_doc_from_meta(documents, meta))
+        if files:
+            tmp = root / "tmp" / uuid.uuid4().hex[:8]
+            tmp.mkdir(parents=True, exist_ok=True)
+            paths: list[Path] = []
+            try:
+                for i, upload in enumerate(files):
+                    target = tmp / _SAFE_NAME.sub("_", upload.filename or f"file_{i}")
+                    with target.open("wb") as out:
+                        while chunk := await upload.read(1024 * 1024):
+                            out.write(chunk)
+                    paths.append(target)
+                docs = [load_document(p) for p in paths]
+            finally:
+                for p in paths:
+                    p.unlink(missing_ok=True)
+                if tmp.exists():
+                    tmp.rmdir()
+        if len(docs) != 2:
+            raise HTTPException(
+                status_code=400,
+                detail="exactly two documents are required (2 files or 2 doc_ids)",
+            )
+        try:
+            report, _findings = compare_documents(docs[0], docs[1], rules=rules_dir)
             return JSONResponse(report)
         except ReconCheckError as err:
             raise HTTPException(status_code=422, detail=str(err)) from err
-        finally:
-            for p in paths:
-                p.unlink(missing_ok=True)
-            tmp.rmdir() if tmp.exists() else None
 
+    # --------------------------------------------------------------- jobs
     @api.post("/jobs")
     async def create_job(
-        files: list[UploadFile] = File(...),
+        files: list[UploadFile] | None = File(default=None),
         config: str = Form("{}"),
+        doc_ids: str = Form(""),
     ) -> dict[str, Any]:
         try:
             cfg = json.loads(config or "{}")
@@ -315,20 +408,48 @@ def create_app(
             raise HTTPException(status_code=400, detail="config must be a JSON object") from err
 
         job_id = uuid.uuid4().hex[:12]
+        used_names: set[str] = set()
         entries: list[dict[str, Any]] = []
-        saved: dict[str, Path] = {}
-        for i, upload in enumerate(files):
-            name = upload.filename or f"file_{i}"
+
+        def unique(name: str) -> str:
+            base, n = name, 1
+            while base in used_names:
+                n += 1
+                base = f"{name}-{n}"
+            used_names.add(base)
+            return base
+
+        for i, upload in enumerate(files or []):
+            name = unique(upload.filename or f"file_{i}")
             path = store.save_upload(job_id, upload, i)
-            saved[name] = path
             entries.append(
                 {
                     "name": name,
                     "kind": guess_kind(name),
                     "base": base_key(name),
                     "path": str(path),
+                    "doc_id": None,
                 }
             )
+        for raw in (doc_ids or "").split(","):
+            doc_id = raw.strip()
+            if not doc_id:
+                continue
+            meta = documents.get(doc_id)
+            if meta is None:
+                raise HTTPException(status_code=404, detail=f"document {doc_id} not found")
+            name = unique(meta["name"])
+            entries.append(
+                {
+                    "name": name,
+                    "kind": guess_kind(name),
+                    "base": base_key(name),
+                    "path": None,
+                    "doc_id": doc_id,
+                }
+            )
+        if not entries:
+            raise HTTPException(status_code=400, detail="no files or documents provided")
 
         pairs: list[dict[str, Any]] = []
         unpaired: list[str] = []
@@ -343,19 +464,12 @@ def create_app(
             for i in range(len(names)):
                 for j in range(i + 1, len(names)):
                     pairs.append(
-                        {
-                            "key": key,
-                            "left": names[i],
-                            "right": names[j],
-                            "left_path": str(saved[names[i]]),
-                            "right_path": str(saved[names[j]]),
-                            "status": "queued",
-                        }
+                        {"key": key, "left": names[i], "right": names[j], "status": "queued"}
                     )
         if not pairs:
             raise HTTPException(
                 status_code=422,
-                detail="no comparable pairs found: files must share a grouping key in their name",
+                detail="no comparable pairs found: documents must share a grouping key in their name",
             )
 
         job: dict[str, Any] = {
@@ -392,6 +506,134 @@ def create_app(
         if rules_dir is not None:
             names = sorted(p.name for p in rules_dir.glob("*.yaml"))
         return {"default": "auto-numeric-diff (built-in)", "files": names}
+
+    # -------------------------------------------------------- documents
+    @api.get("/documents")
+    def list_documents() -> dict[str, Any]:
+        return {"documents": documents.list()}
+
+    @api.post("/documents")
+    async def register_documents(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+        created: list[dict[str, Any]] = []
+        for upload in files:
+            data = await upload.read()
+            if not data:
+                continue
+            name = upload.filename or "unnamed"
+            doc_id = documents.register(name, data, source="upload")
+            meta = documents.get(doc_id)
+            if meta is not None:
+                created.append(meta)
+        return {"documents": created}
+
+    @api.get("/documents/{doc_id}")
+    def get_document(doc_id: str) -> dict[str, Any]:
+        meta = documents.get(doc_id)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="document not found")
+        return {**meta, "preview": _doc_preview(documents, meta)}
+
+    @api.get("/documents/{doc_id}/content")
+    def document_content(doc_id: str) -> Response:
+        meta = documents.get(doc_id)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="document not found")
+        data = documents.content(doc_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail="document content missing")
+        return Response(
+            content=data,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{meta["name"]}"'},
+        )
+
+    @api.delete("/documents/{doc_id}")
+    def delete_document(doc_id: str) -> dict[str, bool]:
+        return {"ok": documents.delete(doc_id)}
+
+    # ------------------------------------------------------- datasources
+    @api.get("/datasources")
+    def list_datasources() -> dict[str, Any]:
+        sources = load_datasources(root)
+        return {"datasources": [s.to_dict(mask=True) for s in sources]}
+
+    @api.post("/datasources")
+    def create_datasource(payload: dict[str, Any]) -> dict[str, Any]:
+        if not str(payload.get("name", "")).strip():
+            raise HTTPException(status_code=400, detail="name is required")
+        if not str(payload.get("url", "")).strip():
+            raise HTTPException(status_code=400, detail="url is required")
+        source = DataSource.from_dict(payload)
+        source.id = uuid.uuid4().hex[:10]
+        save_datasources(root, load_datasources(root) + [source])
+        return source.to_dict(mask=True)
+
+    @api.put("/datasources/{ds_id}")
+    def update_datasource(ds_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sources = load_datasources(root)
+        existing = _require_datasource(ds_id, sources)
+        if not str(payload.get("name", "")).strip():
+            raise HTTPException(status_code=400, detail="name is required")
+        if not str(payload.get("url", "")).strip():
+            raise HTTPException(status_code=400, detail="url is required")
+        if not str(payload.get("token", "")):
+            payload["token"] = existing.token  # keep the stored secret
+        updated = DataSource.from_dict(payload, existing_id=ds_id)
+        sources = [updated if s.id == ds_id else s for s in sources]
+        save_datasources(root, sources)
+        return updated.to_dict(mask=True)
+
+    @api.delete("/datasources/{ds_id}")
+    def delete_datasource(ds_id: str) -> dict[str, bool]:
+        sources = load_datasources(root)
+        _require_datasource(ds_id, sources)
+        save_datasources(root, [s for s in sources if s.id != ds_id])
+        return {"ok": True}
+
+    @api.post("/datasources/{ds_id}/probe")
+    def probe_datasource(ds_id: str) -> dict[str, Any]:
+        source = _require_datasource(ds_id, load_datasources(root))
+        try:
+            return source.probe()
+        except Exception as err:  # noqa: BLE001 - surfaced to the UI
+            return {"ok": False, "error": str(err)}
+
+    @api.post("/datasources/{ds_id}/list")
+    def list_datasource_items(ds_id: str) -> dict[str, Any]:
+        source = _require_datasource(ds_id, load_datasources(root))
+        try:
+            return {"items": source.items()}
+        except Exception as err:  # noqa: BLE001 - surfaced to the UI
+            raise HTTPException(status_code=422, detail=str(err)) from err
+
+    @api.post("/datasources/{ds_id}/fetch")
+    async def fetch_from_datasource(
+        ds_id: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        source = _require_datasource(ds_id, load_datasources(root))
+        record_id = (payload or {}).get("record_id") or None
+        try:
+            if source.type == "records":
+                records = source.records(record_id)
+                name = (
+                    record_id or source.name or "records"
+                ) + ".json"
+                data = json.dumps(records, ensure_ascii=False).encode("utf-8")
+                doc_id = documents.register(
+                    name, data, source="records", datasource_id=ds_id, ext_hint=".json"
+                )
+            else:
+                data = source.fetch_bytes(record_id)
+                name = record_id or (Path(source.url.split("?")[0]).name or source.name or "file")
+                doc_id = documents.register(
+                    name, data, source="datasource", datasource_id=ds_id
+                )
+        except HTTPError as err:
+            raise HTTPException(status_code=502, detail=f"fetch failed: {err}") from err
+        meta = documents.get(doc_id)
+        if meta is None:
+            raise HTTPException(status_code=500, detail="document registration failed")
+        return meta
 
     app.include_router(api)
 

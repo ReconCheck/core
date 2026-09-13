@@ -12,45 +12,154 @@
   <div class="health" id="health"><span class="dot"></span><span id="healthText">连接中…</span></div>
 </header>
 
+<nav class="tabs">
+  <button class="tab active" data-view="compare">批量比对</button>
+  <button class="tab" data-view="ext">数据源 &amp; 文档库</button>
+</nav>
+
 <main>
-  <section class="hero">
-    <h1>把一叠单据拖进来，告诉你哪几处对不上</h1>
-    <p class="sub">
-      支持 CSV / TSV / Excel（PDF 与扫描件解析在开发中）。
-      文件名含相同业务编号的单据会自动配对（如 <code>PO-240913-001</code> 与 <code>INV-240913-001</code>）。
-      每条差异都能点回原文所在单元格。
-    </p>
-  </section>
-
-  <section class="dropzone" id="dropzone" tabindex="0">
-    <input type="file" id="fileinput" multiple accept=".csv,.tsv,.txt,.xlsx,.xlsm" hidden>
-    <div class="dz-inner">
-      <div class="dz-icon">⇪</div>
-      <p><strong>把文件拖到这里</strong>，或 <a href="#" id="browse">点击选择</a></p>
-      <p class="hint">一次可上传多份采购订单 / 发票 / 送货单</p>
+  <!-- ================= view: compare ================= -->
+  <section id="view-compare">
+    <div class="hero">
+      <h1>把一叠单据拖进来，告诉你哪几处对不上</h1>
+      <p class="sub">
+        支持 CSV / TSV / Excel（PDF 与扫描件解析在开发中）。
+        文件名含相同业务编号的单据会自动配对（如 <code>PO-240913-001</code> 与 <code>INV-240913-001</code>）。
+        每条差异都能点回原文所在单元格。也可以从「数据源 &amp; 文档库」把企业系统拉取的单据加入比对。
+      </p>
     </div>
+
+    <section class="dropzone" id="dropzone" tabindex="0">
+      <input type="file" id="fileinput" multiple accept=".csv,.tsv,.txt,.xlsx,.xlsm" hidden>
+      <div class="dz-inner">
+        <div class="dz-icon">⇪</div>
+        <p><strong>把文件拖到这里</strong>，或 <a href="#" id="browse">点击选择</a></p>
+        <p class="hint">一次可上传多份采购订单 / 发票 / 送货单；文档库中的单据点「加入比对」也会出现在这里</p>
+      </div>
+    </section>
+
+    <section class="files hidden" id="filesSection">
+      <h2>待比对文件 <span class="count" id="fileCount"></span></h2>
+      <ul class="filelist" id="fileList"></ul>
+      <div class="actions">
+        <button id="runBtn" class="primary" disabled>开始比对</button>
+        <button id="clearBtn" class="ghost">清空</button>
+      </div>
+    </section>
+
+    <section class="progress hidden" id="progressSection">
+      <h2>正在比对</h2>
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <p class="progress-text" id="progressText">排队中…</p>
+    </section>
+
+    <section class="results hidden" id="resultsSection">
+      <h2>比对结果</h2>
+      <div class="summary" id="summary"></div>
+      <div id="pairs"></div>
+      <div class="unpaired hidden" id="unpaired"></div>
+    </section>
   </section>
 
-  <section class="files hidden" id="filesSection">
-    <h2>待比对文件 <span class="count" id="fileCount"></span></h2>
-    <ul class="filelist" id="fileList"></ul>
-    <div class="actions">
-      <button id="runBtn" class="primary" disabled>开始比对</button>
-      <button id="clearBtn" class="ghost">清空</button>
+  <!-- ================= view: data sources & library ================= -->
+  <section id="view-ext" class="hidden">
+    <div class="ext-grid">
+      <div class="card">
+        <div class="card-head">
+          <h2>数据源 <span class="count">（企业系统 Web API）</span></h2>
+          <button id="newDsBtn" class="primary small">＋ 新增数据源</button>
+        </div>
+
+        <div id="dsForm" class="ds-form hidden">
+          <input type="hidden" id="dsId" value="">
+          <div class="frow">
+            <label>名称 *</label>
+            <input id="dsName" placeholder="如：ERP 采购订单接口">
+          </div>
+          <div class="frow">
+            <label>类型</label>
+            <select id="dsType">
+              <option value="file">文件流（接口返回单据文件）</option>
+              <option value="records">记录 JSON（接口返回记录数组）</option>
+            </select>
+          </div>
+          <div class="frow">
+            <label>URL *</label>
+            <input id="dsUrl" placeholder="https://erp.example.com/api/documents/{id}/file">
+            <span class="hint" id="urlHint">记录型填列表地址；文件型支持 {id} 占位符</span>
+          </div>
+          <div class="frow">
+            <label>方法</label>
+            <select id="dsMethod"><option>GET</option><option>POST</option></select>
+          </div>
+          <div class="frow">
+            <label>鉴权</label>
+            <select id="dsAuth">
+              <option value="none">无</option>
+              <option value="bearer">Bearer Token</option>
+              <option value="header">自定义请求头</option>
+            </select>
+            <div id="authExtra" class="auth-extra hidden">
+              <input id="dsToken" type="password" placeholder="Token / 密钥（留空表示不修改）">
+              <input id="dsHeaderName" placeholder="请求头名称，如 X-API-Key">
+            </div>
+          </div>
+          <div class="frow">
+            <label>额外请求头</label>
+            <textarea id="dsHeaders" rows="2" placeholder='{"Accept": "application/json"}'></textarea>
+          </div>
+          <div class="frow records-only hidden">
+            <label>记录路径</label>
+            <input id="dsRecordsPath" placeholder="如 data.items（数组所在 JSON 路径）">
+          </div>
+          <div class="frow records-only hidden">
+            <label>记录字段</label>
+            <span class="pair-inputs">
+              <input id="dsIdField" placeholder="id 字段，如 id">
+              <input id="dsNameField" placeholder="名称字段，如 doc_no">
+            </span>
+          </div>
+          <div class="frow file-only hidden">
+            <label>列表地址（可选）</label>
+            <input id="dsListUrl" placeholder="https://erp.example.com/api/documents">
+            <span class="hint">配置后可在页面上选择具体单据再拉取；不配置则直接拉取 URL</span>
+          </div>
+          <div class="form-actions">
+            <button id="dsSaveBtn" class="primary">保存</button>
+            <button id="dsCancelBtn" class="ghost">取消</button>
+            <span id="dsFormMsg" class="msg"></span>
+          </div>
+        </div>
+
+        <ul class="dslist" id="dsList">
+          <li class="empty">尚未配置数据源</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>文档库 <span class="count" id="docCount"></span></h2>
+          <button id="docUploadBtn" class="primary small">上传文件入库</button>
+          <input type="file" id="docUploadInput" multiple accept=".csv,.tsv,.txt,.xlsx,.xlsm" hidden>
+        </div>
+        <ul class="dslist" id="docList">
+          <li class="empty">还没有文档——从数据源拉取，或上传文件入库</li>
+        </ul>
+      </div>
     </div>
-  </section>
 
-  <section class="progress hidden" id="progressSection">
-    <h2>正在比对</h2>
-    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
-    <p class="progress-text" id="progressText">排队中…</p>
-  </section>
-
-  <section class="results hidden" id="resultsSection">
-    <h2>比对结果</h2>
-    <div class="summary" id="summary"></div>
-    <div id="pairs"></div>
-    <div class="unpaired hidden" id="unpaired"></div>
+    <!-- record picker -->
+    <div class="modal hidden" id="pickerModal">
+      <div class="modal-box">
+        <h3 id="pickerTitle">选择要拉取的单据</h3>
+        <select id="pickerSelect"></select>
+        <div class="form-actions">
+          <button id="pickerOk" class="primary">拉取</button>
+          <button id="pickerCancel" class="ghost">取消</button>
+          <span id="pickerMsg" class="msg"></span>
+        </div>
+      </div>
+    </div>
   </section>
 </main>
 

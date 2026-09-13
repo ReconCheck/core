@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import io
 from pathlib import Path
+from typing import Any
 
 from openpyxl import load_workbook
 
@@ -146,3 +147,27 @@ def _row_xlsx(values: list[str], p: Path, sheet: str, row_num: int, headers: lis
         cell.coerce()
         cells.append(cell)
     return Row(cells)
+
+
+def document_from_records(records: list[dict[str, Any]], path: str | Path) -> Document:
+    """Build a :class:`Document` from JSON records (e.g. an enterprise API reply).
+
+    ``records`` is a list of flat dicts; the union of keys in first-seen order
+    becomes the header row, and each record becomes one table row with source
+    locations pointing at ``path``.
+    """
+    headers: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        for key in record:
+            if key not in seen:
+                seen.add(key)
+                headers.append(key)
+    deduped = _dedupe_headers(headers)
+    p = Path(str(path))
+    rows = [
+        _row_from_values([str(r.get(h, "")) for h in headers], p, i, deduped)
+        for i, r in enumerate(records, start=2)
+    ]
+    table = Table(headers=deduped, rows=rows, loc=SourceLoc(path=str(p), row=2, col=1))
+    return Document(str(p), [table])

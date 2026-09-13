@@ -187,3 +187,86 @@ td.ev { background: #fff4d6; }
 footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px; }
 
 .hidden { display: none !important; }
+
+/* ---------- tabs ---------- */
+.tabs {
+  display: flex; gap: 4px;
+  max-width: 980px; margin: 0 auto; padding: 0 20px;
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  background: none; border: none; padding: 12px 18px;
+  font-size: 14px; font-weight: 600; color: var(--muted);
+  border-bottom: 2px solid transparent; border-radius: 0;
+  cursor: pointer;
+}
+.tab.active { color: var(--brand); border-bottom-color: var(--brand); }
+
+/* ---------- data sources & library ---------- */
+.ext-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 900px) { .ext-grid { grid-template-columns: 1fr; } }
+
+.card {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 16px 18px 20px;
+}
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.card-head h2 { margin: 0; }
+
+button.small { padding: 5px 12px; font-size: 12.5px; border-radius: 8px; }
+button.danger { color: var(--high); }
+button.danger:hover { background: #fdecea; }
+
+.dslist { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 10px; }
+.dslist > li {
+  border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px;
+  display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;
+}
+.dslist > li.empty { border-style: dashed; color: var(--muted); background: #fafbfd; justify-content: center; }
+.ds-info { flex: 1; min-width: 220px; }
+.ds-name { font-weight: 600; margin-right: 8px; word-break: break-all; }
+.ds-url { color: var(--muted); font-size: 12px; margin-top: 3px; word-break: break-all; }
+.ds-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.ds-msg { color: var(--muted); font-size: 12px; width: 100%; }
+.ds-msg:not(.hidden) { display: block; }
+
+/* ---------- datasource form ---------- */
+.ds-form {
+  border: 1px dashed #c6d2e0; border-radius: 12px; padding: 14px 16px; margin-top: 14px;
+  background: #fafcff; display: grid; gap: 10px;
+}
+.frow { display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: center; }
+.frow label { color: var(--muted); font-size: 13px; font-weight: 600; }
+.frow input, .frow select, .frow textarea {
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px;
+  font-size: 13px; font-family: inherit; background: #fff; width: 100%;
+}
+.frow textarea { resize: vertical; }
+.auth-extra { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; grid-column: 2; }
+.pair-inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.frow .hint { grid-column: 2; color: var(--muted); font-size: 12px; }
+.form-actions { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+.msg { color: var(--medium); font-size: 12.5px; }
+
+/* ---------- badges for ds types ---------- */
+.badge.records { background: #3c7dca; }
+.badge.file { background: #6b4bd6; }
+
+/* ---------- modal ---------- */
+.modal {
+  position: fixed; inset: 0; background: rgba(15, 25, 40, 0.45);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+.modal-box {
+  background: #fff; border-radius: 14px; padding: 20px 22px;
+  width: min(520px, 92vw); box-shadow: var(--shadow);
+}
+.modal-box h3 { margin: 0 0 12px; font-size: 16px; }
+.modal-box select {
+  width: 100%; border: 1px solid var(--line); border-radius: 8px;
+  padding: 9px 10px; font-size: 14px; margin-bottom: 14px;
+}
+.modal-box .msg { margin-left: 10px; }
+
+/* ---------- doc preview ---------- */
+.doc-preview { margin-top: 10px; overflow: auto; max-height: 320px; border: 1px solid var(--line); border-radius: 10px; }

@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5", "httpx>=0.27"]
-web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]
+web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "httpx>=0.27"]
 
 [project.scripts]
 reconcheck = "reconcheck.cli:main"

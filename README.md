@@ -34,20 +34,43 @@ enterprise systems and the upload frontend:
 | Endpoint | Purpose |
 |---|---|
 | `GET  /api/health` | liveness + engine version |
-| `POST /api/compare` | synchronous: compare exactly two uploaded files, returns the report JSON |
-| `POST /api/jobs` | async batch: upload many files, auto-pair by business key in filenames |
+| `POST /api/compare` | synchronous: compare two files and/or `doc_ids`, returns the report JSON |
+| `POST /api/jobs` | async batch: upload files + reference document ids, auto-pair by business key |
 | `GET  /api/jobs/{id}` | job status / progress / per-pair summary |
 | `GET  /api/reports/{id}` | stored comparison report |
+| `GET  /api/documents` · `POST /api/documents` | document library: list / register uploaded files |
+| `GET  /api/documents/{id}` | document meta + parsed table preview |
+| `GET  /api/documents/{id}/content` · `DELETE` | raw download / delete |
+| `GET  /api/datasources` · `POST` · `PUT` · `DELETE` | enterprise data source (custom web API) configuration |
+| `POST /api/datasources/{id}/probe` | connectivity test |
+| `POST /api/datasources/{id}/list` | list pickable records/documents from the source |
+| `POST /api/datasources/{id}/fetch` | fetch a document (file stream) or records (JSON→table) into the library |
 
 Interactive docs at `http://127.0.0.1:8765/docs`. Set `RECONCHECK_API_KEY` to
 require an `X-API-Key` header on every `/api/*` call. Example for enterprise
 callers:
 
 ```bash
+# compare two uploaded files
 curl -X POST http://127.0.0.1:8765/api/compare \
   -H "X-API-Key: $RECONCHECK_API_KEY" \
   -F "files=@po.csv" -F "files=@invoice.csv"
+
+# configure a custom enterprise web API (records JSON) and fetch it
+curl -X POST http://127.0.0.1:8765/api/datasources \
+  -H "Content-Type: application/json" \
+  -d '{"name":"ERP-PO","type":"records","url":"https://erp/api/orders","records_path":"data","auth":"bearer","token":"xxx"}'
+curl -X POST http://127.0.0.1:8765/api/datasources/<id>/fetch
+
+# batch-compare documents fetched from the enterprise system
+curl -X POST http://127.0.0.1:8765/api/jobs \
+  -d "doc_ids=<doc_a>,<doc_b>"
 ```
+
+Data source types: `file` (the endpoint returns the document byte stream, URL
+may contain `{id}`) and `records` (JSON array + `records_path`, converted into
+a table). Auth: `none` / `bearer` / custom `header`. Secrets are stored in the
+local `RECONCHECK_DATA` directory and never echoed by the API.
 
 ## The problem
 
@@ -82,6 +105,8 @@ The output is not a risk score. It is a list of specific, checkable claims about
 
 - [x] Tabular parsing, row alignment, YAML differential rules (tolerance + exceptions), evidence-chain JSON, CLI
 - [x] REST API (`/api/compare`, async `/api/jobs`, reports) + batch-upload web UI with clickable evidence
+- [x] Enterprise data sources: configure custom web APIs, probe, fetch (file stream or records JSON) into the document library
+- [ ] LLM participation (opt-in): alignment disambiguation + finding explanations (interface reserved in `reconcheck/llm`)
 - [ ] Document parsing — scans, borderless tables, multi-column PDFs
 - [ ] Cross-document alignment — entity resolution, unit normalisation
 - [ ] Differential rule engine — richer exception catalogue

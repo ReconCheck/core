@@ -94,6 +94,47 @@ tokens plus separators and lowercases, e.g. `PO-240913-001` and
 `INV-240913-001` both key to `240913001` and are compared as a pair. Files
 whose key appears alone are reported as unpaired.
 
+## Enterprise data sources (custom web APIs)
+
+`web/datasources.py` models a user-configured *data source* — an HTTP wrapper
+an operator (or the frontend form) points at part of an enterprise system:
+
+- **type=file** — the endpoint returns the document byte stream; the URL may
+  contain a `{id}` placeholder filled from the picker; `list_url` optionally
+  serves the pickable `{id, name}` entries.
+- **type=records** — the endpoint returns JSON; `records_path` selects the
+  array (e.g. `data.items`), `id_field`/`name_field` drive the picker, and
+  `parse.document_from_records` converts records into a `Table` (union of
+  keys as headers, one record per row).
+
+Auth: `none` / `bearer` / custom `header` (name in `header_name`). Tokens are
+persisted next to the other data (plaintext in the local data dir — this is an
+operator-configured credential store, not a vault) and never echoed by the
+API (`has_token` instead). Fetched documents land in the *document library*
+(`web/store.py`, `data/documents/<id>/`), previewable as parsed tables and
+referenceable in `/api/compare` and `/api/jobs` via `doc_ids`. Fetching is a
+server-side request (no browser CORS, no SSRF guard in v0 — the operator
+configures the endpoint deliberately).
+
+## LLM participation (design, not yet implemented)
+
+The engine stays deterministic: rules are the primary judge. An opt-in
+`LLMEnhancer` (contract reserved in `reconcheck/llm`, `NullEnhancer` is the
+default) may assist at two seams:
+
+1. **Alignment disambiguation** — rows whose exact keys do not collide go to
+   the model as candidate pairs (`disambiguate`); the engine keeps acceptance
+   control (threshold, limits). Design target: `华加` ↔ `深圳市华加生物科技有限公司`.
+2. **Finding narration** — `explain` attaches a natural-language sentence to a
+   finding; findings touched by the model are flagged `llm_augmented`.
+
+Guardrails: OpenAI-compatible endpoints only (`base_url` + `api_key` + model,
+operator-configured in the same style as data sources); opt-in per job;
+documents only travel to the configured endpoint; timeout, token budget and
+rollback to the deterministic result on any failure; no model call at all when
+disabled. A later milestone wires a concrete OpenAI-compatible client behind
+this contract.
+
 ## Dev setup
 
 ```bash

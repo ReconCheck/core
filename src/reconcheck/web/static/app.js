@@ -5,10 +5,15 @@ const $ = (sel) => document.querySelector(sel);
 
 const KIND_TOKENS = {
   po: ["po", "purchase", "order", "采购", "订单", "订购"],
-  invoice: ["inv", "invoice", "发票", "iv", "ir"],
-  delivery: ["dn", "delivery", "送货", "收货", "asn", "发货"],
+  so: ["so", "sales", "sale", "销售", "销单"],
+  outbound: ["outbound", "out", "shipment", "ship", "出货", "出库", "发运"],
+  invoice: ["invoice", "inv", "发票", "siv", "销项", "iv", "ir"],
+  delivery: ["delivery", "dn", "送货", "收货", "asn", "发货"],
 };
-const KIND_LABEL = { po: "订单", invoice: "发票", delivery: "送货", unknown: "未识别" };
+const KIND_LABEL = {
+  po: "采购订单", so: "销售订单", outbound: "出库单",
+  invoice: "发票", delivery: "送货单", unknown: "未识别",
+};
 
 function kindOf(name) {
   const base = name.replace(/\.[^.]+$/, "").toLowerCase();
@@ -20,9 +25,10 @@ function kindOf(name) {
 
 function baseKey(name) {
   const stem = name.replace(/\.[^.]+$/, "");
-  for (const tokens of Object.values(KIND_TOKENS)) {
-    for (const t of tokens) stem = stem.replace(new RegExp(t, "ig"), "");
-  }
+  const tokens = Object.values(KIND_TOKENS)
+    .flat()
+    .sort((a, b) => b.length - a.length); // "siv" must strip before "iv"
+  for (const t of tokens) stem = stem.replace(new RegExp(t, "ig"), "");
   return stem.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
@@ -63,6 +69,7 @@ function friendly(msg) {
     [/data source returned no records/i, "数据源没有返回任何记录，请检查 records_path 与 record_id 设置"],
     [/document \S+ not found|document not found/i, "找不到该文档（可能已被删除），请重新选择"],
     [/no files or documents provided/i, "没有收到任何文件或文档"],
+    [/ocr|scanned/i, "该 PDF 没有文本层（扫描件）：OCR 尚未接入，请改用带文本层的 PDF 或表格文件"],
     [/fetch failed/i, "从数据源拉取失败（网络或接口错误）"],
   ];
   for (const [re, text] of map) if (re.test(msg)) return text;
@@ -140,7 +147,7 @@ function removeFromQueue(f) {
 
 function addFiles(files) {
   for (const f of files) {
-    if (!/\.(csv|tsv|txt|xlsx|xlsm)$/i.test(f.name)) continue;
+    if (!/\.(csv|tsv|txt|xlsx|xlsm|pdf)$/i.test(f.name)) continue;
     const dup = state.files.some(
       (x) => !x.doc && x.name === f.name && x.size === f.size
     );

@@ -41,7 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from httpx import HTTPError
 
 from .. import __version__
-from ..comparison import compare_documents
+from ..comparison import compare_documents, compare_three
 from ..errors import ReconCheckError
 from ..models import Document
 from ..parse import load_document
@@ -514,6 +514,65 @@ def create_app(
             )
         try:
             report, _findings = compare_documents(docs[0], docs[1], rules=rules_dir)
+            return JSONResponse(report)
+        except ReconCheckError as err:
+            raise HTTPException(status_code=422, detail=str(err)) from err
+
+    # ------------------------------------------------------- compare3
+    @api.post("/compare3")
+    async def compare3(
+        files: list[UploadFile] | None = File(default=None),
+        doc_ids: str = Form(""),
+    ) -> JSONResponse:
+        """Synchronous three-way verification (PO / delivery note / invoice)."""
+        ids = [i.strip() for i in (doc_ids or "").split(",") if i.strip()]
+        if (files or []) and ids:
+            raise HTTPException(status_code=400, detail="pass either files or doc_ids, not both")
+        if len(set(ids)) != len(ids):
+            raise HTTPException(status_code=400, detail="cannot compare a document with itself")
+        docs: list[Document] = []
+        try:
+            for doc_id in ids:
+                if not safe_id(doc_id):
+                    raise HTTPException(status_code=404, detail=f"document {doc_id} not found")
+                meta = documents.get(doc_id)
+                if meta is None:
+                    raise HTTPException(status_code=404, detail=f"document {doc_id} not found")
+                docs.append(_doc_from_meta(documents, meta))
+        except ReconCheckError as err:
+            raise HTTPException(status_code=422, detail=str(err)) from err
+        if files:
+            tmp = root / "tmp" / uuid.uuid4().hex[:8]
+            tmp.mkdir(parents=True, exist_ok=True)
+            paths: list[Path] = []
+            try:
+                for i, upload in enumerate(files):
+                    target = tmp / _SAFE_NAME.sub("_", upload.filename or f"file_{i}")
+                    total = 0
+                    with target.open("wb") as out:
+                        while chunk := await upload.read(1024 * 1024):
+                            total += len(chunk)
+                            if total > MAX_UPLOAD_BYTES:
+                                raise HTTPException(
+                                    status_code=413, detail=f"{upload.filename}: file too large"
+                                )
+                            out.write(chunk)
+                    paths.append(target)
+                docs = [load_document(p) for p in paths]
+            except ReconCheckError as err:
+                raise HTTPException(status_code=422, detail=str(err)) from err
+            finally:
+                for p in paths:
+                    p.unlink(missing_ok=True)
+                if tmp.exists():
+                    tmp.rmdir()
+        if len(docs) != 3:
+            raise HTTPException(
+                status_code=400,
+                detail="exactly three documents are required (3 files or 3 doc_ids)",
+            )
+        try:
+            report = compare_three(docs, rules=rules_dir)
             return JSONResponse(report)
         except ReconCheckError as err:
             raise HTTPException(status_code=422, detail=str(err)) from err

@@ -4,7 +4,12 @@
 
 把一叠格式混乱的单据拖进去，告诉你哪几处对不上、差多少钱、原文在哪一行。
 
-> **Status: early but runnable.** A minimal closed loop works today on tabular files (CSV / TSV / XLSX): point it at a purchase order and an invoice, it parses both, aligns the rows, runs the rules, and emits a JSON report whose every finding cites the exact row and column in the original file. PDF / OCR parsing and real entity resolution are next — watch or star this repository to follow along.
+> **Status: early but runnable.** A closed loop works today on tabular files
+> (CSV / TSV / XLSX) and PDF text layers: point it at a purchase order and an
+> invoice (or a whole PO + delivery note + invoice triple), it parses both,
+> aligns the rows, runs the rules, and emits a JSON report whose every finding
+> cites the exact position in the original file. OCR for scanned documents and
+> real entity resolution are next — watch or star to follow along.
 
 ---
 
@@ -12,12 +17,16 @@
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev,web]"   # Windows
-.venv/bin/python -m pip install -e ".[dev,web]"       # macOS / Linux
+.venv/Scripts/python -m pip install -e ".[dev,web,pdf]"   # Windows; pdf extra = PDF text-layer parsing
+.venv/bin/python -m pip install -e ".[dev,web,pdf]"       # macOS / Linux
 
 # CLI
 .venv/Scripts/reconcheck compare examples/po.csv examples/invoice.csv \
   --rules examples/rules --match-on 料号 --normalize 料号:part_no
+
+# Three-way: purchase order + delivery note + invoice
+.venv/Scripts/reconcheck compare3 examples/po.csv examples/dn.csv examples/invoice.csv \
+  --match-on 料号
 
 # Web UI + REST API (http://127.0.0.1:8765)
 .venv/Scripts/reconcheck-api
@@ -35,6 +44,7 @@ enterprise systems and the upload frontend:
 |---|---|
 | `GET  /api/health` | liveness + engine version |
 | `POST /api/compare` | synchronous: compare two files and/or `doc_ids`, returns the report JSON |
+| `POST /api/compare3` | synchronous three-way verification (PO / delivery note / invoice): 3 files or 3 `doc_ids` |
 | `POST /api/jobs` | async batch: upload files + reference document ids, auto-pair by business key |
 | `GET  /api/jobs/{id}` | job status / progress / per-pair summary |
 | `GET  /api/reports/{id}` | stored comparison report |
@@ -116,11 +126,12 @@ The output is not a risk score. It is a list of specific, checkable claims about
 
 What ships *today* (status details in the [docs](https://github.com/ReconCheck/docs)):
 
-- **Parse** — CSV / TSV / TXT (sniffed delimiters, ragged rows) and XLSX / XLSM (read-only streaming, multi-sheet, optional sheet filter). Encodings: UTF-8, GB18030, UTF-16, Latin-1 — with a plausibility gate so binary junk fails with a clear error instead of parsing as a garbage table.
+- **Parse** — CSV / TSV / TXT (sniffed delimiters, ragged rows), XLSX / XLSM (read-only streaming, multi-sheet, optional sheet filter) and **PDF text layer** (`pip install pdfplumber`; ruling-line tables first, layout fallback for borderless print-outs, a clear error for scanned files that need OCR). Encodings: UTF-8, GB18030, UTF-16, Latin-1 — with a plausibility gate so binary junk fails with a clear error instead of parsing as a garbage table.
 - **Align** — exact key matching on `match_on` with normalisation (part numbers, entity suffixes, whitespace); cell-level units (`"5000 g"` → value `5000`, unit `"g"`) survive into the judgement stage.
-- **Judge** — YAML differential rules (relative + absolute tolerance; exceptions: unit conversion `kg↔g`, rounding; severity; `evidence.require: both_sides`) **plus a built-in auto rule as the baseline** that compares every shared numeric column and never double-reports a column an explicit rule covers.
-- **Cite** — every finding carries coordinates on both sides and a `cell://` href into the original file.
-- **CLI** — `reconcheck compare ...` with clean error handling.
+- **Judge** — YAML differential rules (relative + absolute tolerance; exceptions: unit conversion `kg↔g`, rounding, **`dates_within: {days}` date tolerance**, **case-insensitive text equality**; severity; `evidence.require: both_sides`) **plus a built-in auto rule as the baseline** that compares every shared numeric column and never double-reports a column an explicit rule covers.
+- **Cite** — every finding carries coordinates on both sides and a `cell://` href into the original file (PDF findings cite the page).
+- **Three-way verification** — `reconcheck compare3 PO DN INV` / `POST /api/compare3` verifies purchase order, delivery note and invoice together: every pairwise report plus a conflicts section that names the outlier side per key and field.
+- **CLI** — `reconcheck compare ...` / `compare3 ...` with clean error handling.
 - **REST API** — synchronous compare, async batch jobs (auto-pairing, per-pair progress, failed-pair isolation), document library, stored reports, and user-configured enterprise data sources (probe / list / fetch).
 - **Frontend** — dependency-free static page: drag-and-drop batch upload, comparison results with clickable evidence highlighting the source cell, document library, data-source configuration form.
 - **Ops & security** — 64 MB upload / 50 MB streaming fetch caps, document-id allowlist (path-traversal guard), optional `X-API-Key` auth with a startup warning, atomic persistence, queued-job replay after restart, TTL janitor for uploads/reports (`RECONCHECK_TTL_DAYS`).
@@ -136,14 +147,16 @@ Full capability matrix, end-user guide and cross-engine design: [ReconCheck/docs
 ## Roadmap
 
 - [x] Tabular parsing, row alignment, YAML differential rules (tolerance + exceptions), evidence-chain JSON, CLI
-- [x] REST API (`/api/compare`, async `/api/jobs`, reports) + batch-upload web UI with clickable evidence
+- [x] PDF text-layer parsing (pdfplumber; scan-only files raise a clear "OCR not wired" error)
+- [x] Exception catalogue: unit conversion, rounding, date tolerance (`dates_within`), case-insensitive text equality
+- [x] REST API (`/api/compare`, `/api/compare3`, async `/api/jobs`, reports) + batch-upload web UI with clickable evidence
 - [x] Enterprise data sources: configure custom web APIs, probe, fetch (file stream or records JSON) into the document library
+- [x] Three-way match: purchase order / delivery note / invoice (compare3)
 - [ ] LLM participation (opt-in): alignment disambiguation + finding explanations (interface reserved in `reconcheck/llm`)
-- [ ] Document parsing — scans, borderless tables, multi-column PDFs
-- [ ] Cross-document alignment — entity resolution, unit normalisation
-- [ ] Differential rule engine — richer exception catalogue
+- [ ] OCR for scanned PDFs/images; borderless multi-column layout recovery
+- [ ] Cross-document alignment — entity resolution, fuzzy matching, unit normalisation
+- [ ] Differential rule engine — richer exception catalogue (v1 spec freeze next)
 - [ ] Evidence-chain output format — stable v1
-- [ ] Three-way match: purchase order / delivery note / invoice
 
 Order is not a promise. It is the order in which the pieces are useful.
 
@@ -167,7 +180,7 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 它解决的是 ERP 不解决的问题：ERP 负责记账，不负责检查账记的这几份文件之间是否自洽。
 
-> 项目处于早期开发阶段，表格类文件（CSV/TSV/XLSX）的最小闭环已可用，PDF/OCR 解析与实体对齐是下一步。欢迎 Watch / Star 关注进展。
+> 项目处于中期开发阶段，表格类文件（CSV/TSV/XLSX）与 PDF 文本层的解析、三方核对（compare3）已可用；扫描件 OCR 与实体对齐是下一步。欢迎 Watch / Star 关注进展。
 
 使用方式与功能清单见 [docs 仓库](https://github.com/ReconCheck/docs)：中文《用户使用指南》《功能能力清单》+ 英文 capability list。
 

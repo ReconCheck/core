@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ import yaml
 from ..align import AlignedPair
 from ..align.units import convert
 from ..models import Cell, Evidence, Finding, Severity, Table
+
+_DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%Y年%m月%d日")
 
 DEFAULT_RULE: dict[str, Any] = {
     "id": "auto-numeric-diff",
@@ -165,33 +168,44 @@ def _compare_columns(
 def _diff_pair(rule: Rule, pair: AlignedPair, skip: set[str] | None = None) -> list[Finding]:
     out: list[Finding] = []
     for header, left_cell, right_cell in _compare_columns(rule, pair, skip=skip):
+        verdict = _exception_verdict(rule.exceptions, left_cell, right_cell)
+        if verdict == "exempt":
+            continue
+        if verdict == "text_differs":
+            # a date/text exception declared interest and the values differ:
+            # report it even though the column is not numeric
+            if rule.require_both_sides and (not left_cell.loc.row or not right_cell.loc.row):
+                continue
+            claim = f"{header}: {left_cell.text.strip()} vs {right_cell.text.strip()} on key {pair.key!r}"
+            out.append(_make_finding(rule, header, left_cell, right_cell, claim))
+            continue
         if left_cell.value is None or right_cell.value is None:
             continue
         if _within_tolerance(left_cell.value, right_cell.value, rule.tolerance):
             continue
-        if _exception_applies(rule.exceptions, left_cell, right_cell):
-            continue
-        if rule.require_both_sides and (not left_cell.loc.row or not right_cell.loc.row):
-            continue
         claim = (
             f"{header}: {left_cell.text.strip()} vs {right_cell.text.strip()} on key {pair.key!r}"
         )
-        out.append(
-            Finding(
-                id=uuid.uuid4().hex[:10],
-                rule_id=rule.id,
-                severity=rule.severity,
-                claim=claim,
-                field=header,
-                left_value=left_cell.text.strip(),
-                right_value=right_cell.text.strip(),
-                evidence=[
-                    Evidence(side="left", loc=left_cell.loc, excerpt=left_cell.text.strip()),
-                    Evidence(side="right", loc=right_cell.loc, excerpt=right_cell.text.strip()),
-                ],
-            )
-        )
+        out.append(_make_finding(rule, header, left_cell, right_cell, claim))
     return out
+
+
+def _make_finding(
+    rule: Rule, header: str, left_cell: Cell, right_cell: Cell, claim: str
+) -> Finding:
+    return Finding(
+        id=uuid.uuid4().hex[:10],
+        rule_id=rule.id,
+        severity=rule.severity,
+        claim=claim,
+        field=header,
+        left_value=left_cell.text.strip(),
+        right_value=right_cell.text.strip(),
+        evidence=[
+            Evidence(side="left", loc=left_cell.loc, excerpt=left_cell.text.strip()),
+            Evidence(side="right", loc=right_cell.loc, excerpt=right_cell.text.strip()),
+        ],
+    )
 
 
 def _within_tolerance(left: Decimal, right: Decimal, tolerance: dict[str, Any]) -> bool:
@@ -201,30 +215,66 @@ def _within_tolerance(left: Decimal, right: Decimal, tolerance: dict[str, Any]) 
     return abs(left - right) <= t_abs + t_rel * scale
 
 
-def _exception_applies(exceptions: list[dict[str, Any]], left: Cell, right: Cell) -> bool:
+def _exception_verdict(exceptions: list[dict[str, Any]], left: Cell, right: Cell) -> str:
+    """Classify an exception match for one cell pair.
+
+    Returns ``"exempt"`` when an exception swallows the difference,
+    ``"text_differs"`` when a date/text exception applies but the values
+    genuinely differ (so a non-numeric column can still produce a finding),
+    or ``""`` when no exception cares.
+    """
     for exc in exceptions:
         when = exc.get("when") if isinstance(exc, dict) else None
         when = when or {}
+        if when.get("text_equal_ignore_case"):
+            lt = (left.text or "").strip()
+            rt = (right.text or "").strip()
+            if not lt or not rt:
+                continue
+            return "exempt" if lt.lower() == rt.lower() else "text_differs"
+        if "dates_within" in when:
+            ld = _parse_date(left.text)
+            rd = _parse_date(right.text)
+            if ld is None or rd is None:
+                continue
+            days = max(0, int(when["dates_within"].get("days", 3)))
+            return "exempt" if abs((ld - rd).days) <= days else "text_differs"
         if "rounding" in when:
+            if left.value is None or right.value is None:
+                continue
             decimals = int(when["rounding"].get("decimals", 2))
             quantum = Decimal(f"1e-{decimals}")
-            if (
-                left.value is not None
-                and right.value is not None
-                and left.value.quantize(quantum) == right.value.quantize(quantum)
-            ):
-                return True
+            if left.value.quantize(quantum) == right.value.quantize(quantum):
+                return "exempt"
         if "unit_conversion_between" in when:
             allowed = when["unit_conversion_between"]
-            if len(allowed) == 2 and _units_covered(allowed, left.unit, right.unit):
+            if left.value is None or right.value is None or len(allowed) != 2:
+                continue
+            if _units_covered(allowed, left.unit, right.unit):
                 converted = convert(right.value, right.unit, left.unit)
                 if converted is not None and _within_tolerance(
                     left.value,
                     converted,
                     {"relative": Decimal("0.001"), "absolute": Decimal("0.0001")},
                 ):
-                    return True
-    return False
+                    return "exempt"
+    return ""
+
+
+def _parse_date(text: str | None):
+    """Parse common date layouts (ISO, slash, dotted, compact, Chinese)."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    for sep in (" ", "T"):
+        if sep in t:
+            t = t.split(sep)[0]
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(t, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _units_covered(allowed: list[Any], a: str | None, b: str | None) -> bool:

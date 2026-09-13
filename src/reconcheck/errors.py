@@ -15,3 +15,7 @@ class TextDecodeError(ReconCheckError):
 
 class EmptyDocumentError(ReconCheckError):
     """A document contains no parseable table."""
+
+
+class PdfOcrRequiredError(ReconCheckError):
+    """The PDF has no extractable text layer; OCR is required but not wired."""

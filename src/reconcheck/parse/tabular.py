@@ -17,6 +17,7 @@ from openpyxl import load_workbook
 
 from ..errors import TextDecodeError, UnsupportedFormatError
 from ..models import Cell, Document, Row, SourceLoc, Table
+from .pdf import load_pdf
 
 _DELIMITERS = {".csv": ",", ".tsv": "\t", ".txt": None}
 # reject a decodable-but-garbage candidate when this share of its characters
@@ -58,8 +59,10 @@ def load_document(path: str | Path, sheet: str | None = None) -> Document:
         return _document_from_delimited(p)
     if suffix in {".xlsx", ".xlsm"}:
         return _document_from_xlsx(p, sheet)
+    if suffix == ".pdf":
+        return load_pdf(p)
     raise UnsupportedFormatError(
-        f"unsupported file type '{suffix}' (supported: .csv, .tsv, .txt, .xlsx)"
+        f"unsupported file type '{suffix}' (supported: .csv, .tsv, .txt, .xlsx, .pdf)"
     )
 
 

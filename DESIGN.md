@@ -10,6 +10,10 @@ The engine is four stages, in this order:
 1. **Parse** — turn an input file into `Document -> Table -> Row -> Cell`.
    Every cell carries a `SourceLoc` (path, sheet/page, 1-based row, 1-based
    column, header), so any later claim can be pointed back to the original file.
+   Tabular: CSV / TSV / TXT and XLSX / XLSM. PDF (text layer, via the optional
+   `pdf` extra): ruling-line tables first, then a layout fallback that clusters
+   words into rows/columns; a PDF without extractable text raises
+   `PdfOcrRequiredError` instead of parsing garbage (OCR is a later milestone).
 2. **Align** — match rows across two tables on one or more key columns
    (`match_on`). Keys are normalised first: part numbers (`A-012` → `a12`),
    legal-suffix stripping for entity names, whitespace. Rows that do not match
@@ -52,18 +56,36 @@ evidence:
   require: both_sides  # skip a finding that cannot cite both source cells
 ```
 
-Implemented exception kinds: `unit_conversion_between`, `rounding`.
+Implemented exception kinds: `unit_conversion_between`, `rounding`,
+`dates_within: {days}` (both sides parse as dates, |Δdays| ≤ N exempt — a
+real date difference is still reported), `text_equal_ignore_case: true`
+(case-insensitive equality exempts; a real text difference is reported).
 With no `--rules` the engine uses a built-in auto rule: any common column that
 has numbers on both sides, tolerance `relative 0.001 / absolute 0.01`.
 
+## Three-way verification
+
+`compare_three(docs)` / `reconcheck compare3 PO DN INV` /
+`POST /api/compare3` runs the normal two-way pipeline on every unordered pair
+(three reports) **and** a `three_way` section: for each shared key and field it
+compares the three documents (numbers use the tightest tolerance an applying
+rule declares, text compares case-insensitively), reports `consistent` plus
+`outlier_indices` — the sides that disagree with the majority, e.g. an invoice
+that does not match the PO and delivery note.
+
 ## Current limitations (next phases)
 
-- No PDF or image parsing yet (scans, borderless tables, multi-column) — OCR
-  pipeline is the next milestone.
-- XLSX merged cells: value read from the top-left cell only.
+- No OCR for scanned PDFs/images yet (a PDF without a text layer raises a
+  clear error); borderless multi-column layouts rely on the word-clustering
+  fallback and can be imperfect.
+- PDF table detection follows ruling lines first; merged cells inside PDF
+  tables collapse to their left value. XLSX merged cells: value read from the
+  top-left cell only.
 - Entity resolution is suffix/whitespace stripping, not full linking
   (`华加` vs `深圳市华加生物科技有限公司` still needs a real resolution pass).
-- Row matching is exact key equality; fuzzy and three-way matching are future.
+- Row matching between two documents is exact key equality; fuzzy matching is
+  future. Three-way verification aligns each pair with the same exact-key
+  alignment and adds a majority/outlier pass per field.
 - Batch pairing keys on filenames only (kind tokens such as `po`/`inv` are
   stripped; the remaining business key must be shared by the files of one
   group). Manual pairing UI is future work.
@@ -161,7 +183,7 @@ this contract.
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev]"   # Windows
+.venv/Scripts/python -m pip install -e ".[dev,pdf]"   # Windows (pdf extra for PDF tests)
 pytest
 ruff check src tests
 reconcheck compare examples/po.csv examples/invoice.csv \

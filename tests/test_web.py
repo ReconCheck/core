@@ -228,6 +228,44 @@ def test_jobs_identical_uploads_are_deduplicated(tmp_path: Path):
         assert "two distinct documents" in r.json()["detail"]
 
 
+def test_sales_chain_tokens_and_keys():
+    """Sales-chain filenames pair under the same business-key heuristic."""
+    from reconcheck.web.app import base_key, guess_kind
+
+    assert base_key("SO-240913-001.csv") == "240913001"
+    assert base_key("SIV-240913-001.csv") == "240913001"
+    assert base_key("OUT-240913-001.csv") == "240913001"
+    assert base_key("销售订单-240913-001.csv") == "240913001"
+    assert base_key("销项发票-240913-001.csv") == "240913001"
+    assert guess_kind("SO-240913-001.csv") == "so"
+    assert guess_kind("SIV-240913-001.csv") == "invoice"
+    assert guess_kind("OUT-240913-001.csv") == "outbound"
+    # purchase chain untouched
+    assert base_key("PO-240913-001.csv") == "240913001"
+    assert base_key("INV-240913-001.csv") == "240913001"
+    assert guess_kind("INV-240913-001.csv") == "invoice"
+    assert guess_kind("PO-240913-001.csv") == "po"
+
+
+def test_jobs_sales_chain_auto_pairs(tmp_path: Path):
+    """SO + outbound + sales invoice group into three pairs, none unpaired."""
+    with _client(tmp_path) as client:
+        r = client.post(
+            "/api/jobs",
+            files=[
+                ("files", ("SO-240913-001.csv", b"id,amount\n1,100.00\n", "text/csv")),
+                ("files", ("OUT-240913-001.csv", b"id,amount\n1,99.00\n", "text/csv")),
+                ("files", ("SIV-240913-001.csv", b"id,amount\n1,100.50\n", "text/csv")),
+            ],
+        )
+        assert r.status_code == 200
+        job = r.json()
+        assert job["unpaired"] == []
+        assert len(job["pairs"]) == 3
+        kinds = {e["kind"] for e in job["files"]}
+        assert kinds == {"so", "outbound", "invoice"}
+
+
 def test_jobstore_cleanup_ttl(tmp_path: Path):
     """Janitor pruning: old job dirs/reports die, active jobs survive."""
     store = webapp.JobStore(tmp_path / "data")

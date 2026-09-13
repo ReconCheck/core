@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/ReconCheck/core/actions/workflows/ci.yml/badge.svg) · Python 3.10+ (Linux / macOS / Windows) · Apache-2.0
 
-**Cross-document verification engine.** Point it at messy invoices, purchase orders and delivery notes. It tells you what doesn't match, by how much, and where in the original file.
+**Cross-document verification engine.** Point it at messy invoices, purchase orders, delivery notes — or their sales-side counterparts (sales orders, outbound notes, sales invoices). It tells you what doesn't match, by how much, and where in the original file.
 
 把一叠格式混乱的单据拖进去，告诉你哪几处对不上、差多少钱、原文在哪一行。
 
@@ -28,6 +28,10 @@ python -m venv .venv
 
 # Three-way: purchase order + delivery note + invoice
 .venv/Scripts/reconcheck compare3 examples/po.csv examples/dn.csv examples/invoice.csv \
+  --match-on 料号
+
+# Sales chain: sales order + outbound + sales invoice (same engine, same rules)
+.venv/Scripts/reconcheck compare3 examples/so.csv examples/outbound.csv examples/sales-invoice.csv \
   --match-on 料号
 
 # Web UI + REST API (http://127.0.0.1:8765)
@@ -132,7 +136,7 @@ What ships *today* (status details in the [docs](https://github.com/ReconCheck/d
 - **Align** — exact key matching on `match_on` with normalisation (part numbers, entity suffixes, whitespace); cell-level units (`"5000 g"` → value `5000`, unit `"g"`) survive into the judgement stage.
 - **Judge** — YAML differential rules (relative + absolute tolerance; exceptions: unit conversion `kg↔g`, rounding, **`dates_within: {days}` date tolerance**, **case-insensitive text equality**; severity; `evidence.require: both_sides`) **plus a built-in auto rule as the baseline** that compares every shared numeric column and never double-reports a column an explicit rule covers.
 - **Cite** — every finding carries coordinates on both sides and a `cell://` href into the original file (PDF findings cite the page).
-- **Three-way verification** — `reconcheck compare3 PO DN INV` / `POST /api/compare3` verifies purchase order, delivery note and invoice together: every pairwise report plus a conflicts section that names the outlier side per key and field.
+- **Three-way verification** — `reconcheck compare3 PO DN INV` / `POST /api/compare3` verifies a three-document set together: every pairwise report plus a conflicts section that names the outlier side per key and field. Chain-agnostic — the purchase chain (PO + delivery note + invoice) and the sales chain (sales order + outbound + sales invoice) work alike, sharing the same rules.
 - **CLI** — `reconcheck compare ...` / `compare3 ...` with clean error handling.
 - **REST API** — synchronous compare, async batch jobs (auto-pairing, per-pair progress, failed-pair isolation), document library, stored reports, and user-configured enterprise data sources (probe / list / fetch).
 - **Frontend** — dependency-free static page: drag-and-drop batch upload, comparison results with clickable evidence highlighting the source cell, document library, data-source configuration form.

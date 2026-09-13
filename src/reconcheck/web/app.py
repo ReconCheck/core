@@ -213,10 +213,28 @@ class JobStore:
 # ---------------------------------------------------------------------------
 
 _KIND_TOKENS: dict[str, tuple[str, ...]] = {
+    # purchase chain
     "po": ("po", "purchase", "order", "采购", "订单", "订购"),
-    "invoice": ("inv", "invoice", "发票", "iv", "ir"),
-    "delivery": ("dn", "delivery", "送货", "收货", "asn", "发货"),
+    # sales chain
+    "so": ("so", "sales", "sale", "销售", "销单"),
+    "outbound": ("outbound", "out", "shipment", "ship", "出货", "出库", "发运"),
+    "invoice": (
+        "invoice",
+        "inv",
+        "发票",
+        "siv",
+        "销项",
+        "iv",
+        "ir",
+    ),
+    "delivery": ("delivery", "dn", "送货", "收货", "asn", "发货"),
 }
+# strip longer tokens first so overlapping ones ("siv" before "iv") behave
+_ALL_TOKENS = sorted(
+    (tok for tokens in _KIND_TOKENS.values() for tok in tokens),
+    key=len,
+    reverse=True,
+)
 
 
 def guess_kind(filename: str) -> str:
@@ -229,9 +247,8 @@ def guess_kind(filename: str) -> str:
 
 def _strip_kind_token(base: str) -> str:
     lowered = base.lower()
-    for tokens in _KIND_TOKENS.values():
-        for tok in tokens:
-            lowered = lowered.replace(tok, "")
+    for tok in _ALL_TOKENS:
+        lowered = lowered.replace(tok, "")
     return lowered
 
 

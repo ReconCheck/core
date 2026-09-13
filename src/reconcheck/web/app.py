@@ -622,11 +622,13 @@ def create_app(
 
         try:
             for i, upload in enumerate(files or []):
-                name = unique(upload.filename or f"file_{i}")
+                orig = upload.filename or f"file_{i}"
+                name = unique(orig)
                 path = store.save_upload(job_id, upload, i)
                 entries.append(
                     {
                         "name": name,
+                        "orig_name": orig,
                         "kind": guess_kind(name),
                         "base": base_key(name),
                         "path": str(path),
@@ -646,6 +648,7 @@ def create_app(
                 entries.append(
                     {
                         "name": name,
+                        "orig_name": meta["name"],
                         "kind": guess_kind(name),
                         "base": base_key(name),
                         "path": None,
@@ -659,10 +662,12 @@ def create_app(
             shutil.rmtree(store.files_dir / job_id, ignore_errors=True)
             raise HTTPException(status_code=413, detail=str(err)) from err
 
-        # drop duplicate entries: same doc_id twice, or identical uploaded
-        # content twice (the "-2" rename keeps the same grouping stem, which
-        # would otherwise turn into a pointless self-comparison)
-        upload_hashes: dict[str, str] = {}
+        # drop duplicate entries: same doc_id twice, or the *same filename with
+        # identical content* twice (a repeated upload of the same file). Two
+        # documents with different names but identical bytes — e.g. a PO and a
+        # delivery note that match perfectly — are legitimately distinct and
+        # must both survive, or a clean reconciliation would vanish.
+        upload_seen: dict[tuple[str, str], str] = {}
         unique_entries: list[dict[str, Any]] = []
         seen_identity: set[str] = set()
         for entry in entries:
@@ -671,9 +676,10 @@ def create_app(
                 continue
             if entry["path"]:
                 digest = hashlib.sha256(Path(entry["path"]).read_bytes()).hexdigest()
-                if digest in upload_hashes:
+                same_upload = (digest, entry.get("orig_name") or entry["name"])
+                if same_upload in upload_seen:
                     continue
-                upload_hashes[digest] = identity
+                upload_seen[same_upload] = identity
             seen_identity.add(identity)
             unique_entries.append(entry)
         entries = unique_entries

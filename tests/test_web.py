@@ -228,6 +228,29 @@ def test_jobs_identical_uploads_are_deduplicated(tmp_path: Path):
         assert "two distinct documents" in r.json()["detail"]
 
 
+def test_jobs_same_content_different_names_both_survive(tmp_path: Path):
+    """A PO and a DN that match perfectly are two documents, not a duplicate.
+
+    Content-hash dedupe must key on (bytes, filename): a clean
+    reconciliation where both sides are byte-identical is the normal,
+    desired case — merging it would show only one document.
+    """
+    with _client(tmp_path) as client:
+        data = b"id,amount\n1,100.00\n"
+        r = client.post(
+            "/api/jobs",
+            files=[
+                ("files", ("PO-240913-001.csv", data, "text/csv")),
+                ("files", ("DN-240913-001.csv", data, "text/csv")),
+            ],
+        )
+        assert r.status_code == 200
+        job = r.json()
+        assert job["unpaired"] == []
+        assert len(job["pairs"]) == 1
+        assert job["pairs"][0]["left"] != job["pairs"][0]["right"]
+
+
 def test_sales_chain_tokens_and_keys():
     """Sales-chain filenames pair under the same business-key heuristic."""
     from reconcheck.web.app import base_key, guess_kind

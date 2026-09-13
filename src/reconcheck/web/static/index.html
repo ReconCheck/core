@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReconCheck · 单据交叉核对</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">∅</span> ReconCheck <span class="cn">单据交叉核对</span></div>
+  <div class="health" id="health"><span class="dot"></span><span id="healthText">连接中…</span></div>
+</header>
+
+<main>
+  <section class="hero">
+    <h1>把一叠单据拖进来，告诉你哪几处对不上</h1>
+    <p class="sub">
+      支持 CSV / TSV / Excel（PDF 与扫描件解析在开发中）。
+      文件名含相同业务编号的单据会自动配对（如 <code>PO-240913-001</code> 与 <code>INV-240913-001</code>）。
+      每条差异都能点回原文所在单元格。
+    </p>
+  </section>
+
+  <section class="dropzone" id="dropzone" tabindex="0">
+    <input type="file" id="fileinput" multiple accept=".csv,.tsv,.txt,.xlsx,.xlsm" hidden>
+    <div class="dz-inner">
+      <div class="dz-icon">⇪</div>
+      <p><strong>把文件拖到这里</strong>，或 <a href="#" id="browse">点击选择</a></p>
+      <p class="hint">一次可上传多份采购订单 / 发票 / 送货单</p>
+    </div>
+  </section>
+
+  <section class="files hidden" id="filesSection">
+    <h2>待比对文件 <span class="count" id="fileCount"></span></h2>
+    <ul class="filelist" id="fileList"></ul>
+    <div class="actions">
+      <button id="runBtn" class="primary" disabled>开始比对</button>
+      <button id="clearBtn" class="ghost">清空</button>
+    </div>
+  </section>
+
+  <section class="progress hidden" id="progressSection">
+    <h2>正在比对</h2>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <p class="progress-text" id="progressText">排队中…</p>
+  </section>
+
+  <section class="results hidden" id="resultsSection">
+    <h2>比对结果</h2>
+    <div class="summary" id="summary"></div>
+    <div id="pairs"></div>
+    <div class="unpaired hidden" id="unpaired"></div>
+  </section>
+</main>
+
+<footer>ReconCheck · 引擎 v0.1.0 · 文档只读，数据不离开服务器</footer>
+<script src="/app.js"></script>
+</body>
+</html>

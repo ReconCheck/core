@@ -64,8 +64,35 @@ has numbers on both sides, tolerance `relative 0.001 / absolute 0.01`.
 - Entity resolution is suffix/whitespace stripping, not full linking
   (`华加` vs `深圳市华加生物科技有限公司` still needs a real resolution pass).
 - Row matching is exact key equality; fuzzy and three-way matching are future.
-- CLI `compare` uses the first table of each document (CSV has one; XLSX
-  compare per-sheet is on the way).
+- Batch pairing keys on filenames only (kind tokens such as `po`/`inv` are
+  stripped; the remaining business key must be shared by the files of one
+  group). Manual pairing UI is future work.
+- Job and report state lives in the server process (jobs.json + reports dir
+  under `RECONCHECK_DATA`); no distributed queue yet.
+
+## Web layer
+
+`src/reconcheck/web/app.py` is a FastAPI app (`reconcheck-api`, port 8765):
+
+- `/api/compare` — synchronous two-file comparison (multipart), same report
+  contract as the CLI.
+- `/api/jobs` — upload any number of files; the server groups them by business
+  key (see below) and compares every pair in a background worker; poll
+  `/api/jobs/{id}` for progress.
+- `/api/reports/{id}` — stored report JSON, deep-linkable.
+- Optional `RECONCHECK_API_KEY` (env) turns on `X-API-Key` enforcement for
+  every `/api/*` route; the static frontend stays open.
+- The frontend is a dependency-free static app (no CDN, no build step) served
+  from `web/static/`: drag-drop upload, auto pairing, severity summary, and
+  click-to-highlight evidence cells in the rendered source tables.
+
+### Pairing heuristic
+
+`guess_kind` marks a file as `po` / `invoice` / `delivery` / `unknown` by kind
+tokens in the filename (`po`, `order`, `采购` …). `base_key` strips those
+tokens plus separators and lowercases, e.g. `PO-240913-001` and
+`INV-240913-001` both key to `240913001` and are compared as a pair. Files
+whose key appears alone are reported as unpaired.
 
 ## Dev setup
 

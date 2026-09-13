@@ -8,10 +8,9 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .align import align
-from .parse import load_document
-from .report import build_report, write_json
-from .rules import evaluate, load_rules
+from .comparison import compare_files
+from .errors import ReconCheckError
+from .report import write_json
 
 
 def _parse_normalize(specs: list[str]) -> dict[str, str]:
@@ -24,16 +23,18 @@ def _parse_normalize(specs: list[str]) -> dict[str, str]:
 
 
 def run_compare(args: argparse.Namespace) -> int:
-    left = load_document(args.left, sheet=args.sheet)
-    right = load_document(args.right, sheet=args.sheet)
-    if not left.tables or not right.tables:
-        print("error: one of the documents has no table", file=sys.stderr)
+    try:
+        report, _findings = compare_files(
+            args.left,
+            args.right,
+            rules=args.rules,
+            match_on=args.match_on,
+            normalize=_parse_normalize(args.normalize),
+            sheet=args.sheet,
+        )
+    except ReconCheckError as err:
+        print(f"error: {err}", file=sys.stderr)
         return 2
-    lt, rt = left.tables[0], right.tables[0]
-    pairs = align(lt, rt, match_on=args.match_on, normalize=_parse_normalize(args.normalize))
-    rules = load_rules(args.rules)
-    findings = evaluate(rules, lt, rt, pairs)
-    report = build_report(left, right, findings, aligned_pairs=len(pairs))
     if args.output:
         write_json(report, args.output)
         print(f"wrote {args.output}")

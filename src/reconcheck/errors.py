@@ -7,3 +7,7 @@ class ReconCheckError(Exception):
 
 class UnsupportedFormatError(ReconCheckError):
     """The input file type is not supported yet."""
+
+
+class EmptyDocumentError(ReconCheckError):
+    """A document contains no parseable table."""

@@ -12,15 +12,42 @@
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev]"      # Windows
-.venv/bin/python -m pip install -e ".[dev]"          # macOS / Linux
+.venv/Scripts/python -m pip install -e ".[dev,web]"   # Windows
+.venv/bin/python -m pip install -e ".[dev,web]"       # macOS / Linux
 
+# CLI
 .venv/Scripts/reconcheck compare examples/po.csv examples/invoice.csv \
   --rules examples/rules --match-on 料号 --normalize 料号:part_no
+
+# Web UI + REST API (http://127.0.0.1:8765)
+.venv/Scripts/reconcheck-api
 ```
 
 Every finding in the report carries `evidence` with a `cell://` href pointing
 back to the exact cell in the original file — that is the whole point.
+
+## Web API
+
+The FastAPI service (`reconcheck-api`, port 8765) is the integration point for
+enterprise systems and the upload frontend:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET  /api/health` | liveness + engine version |
+| `POST /api/compare` | synchronous: compare exactly two uploaded files, returns the report JSON |
+| `POST /api/jobs` | async batch: upload many files, auto-pair by business key in filenames |
+| `GET  /api/jobs/{id}` | job status / progress / per-pair summary |
+| `GET  /api/reports/{id}` | stored comparison report |
+
+Interactive docs at `http://127.0.0.1:8765/docs`. Set `RECONCHECK_API_KEY` to
+require an `X-API-Key` header on every `/api/*` call. Example for enterprise
+callers:
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/compare \
+  -H "X-API-Key: $RECONCHECK_API_KEY" \
+  -F "files=@po.csv" -F "files=@invoice.csv"
+```
 
 ## The problem
 
@@ -54,12 +81,12 @@ The output is not a risk score. It is a list of specific, checkable claims about
 ## Roadmap
 
 - [x] Tabular parsing, row alignment, YAML differential rules (tolerance + exceptions), evidence-chain JSON, CLI
+- [x] REST API (`/api/compare`, async `/api/jobs`, reports) + batch-upload web UI with clickable evidence
 - [ ] Document parsing — scans, borderless tables, multi-column PDFs
 - [ ] Cross-document alignment — entity resolution, unit normalisation
 - [ ] Differential rule engine — richer exception catalogue
 - [ ] Evidence-chain output format — stable v1
 - [ ] Three-way match: purchase order / delivery note / invoice
-- [ ] REST API
 
 Order is not a promise. It is the order in which the pieces are useful.
 

@@ -77,7 +77,49 @@ class UploadTooLarge(Exception):
 
 
 def _default_rules_dir() -> Path | None:
-    return DEFAULT_RULES_DIR if DEFAULT_RULES_DIR.is_dir() else None
+    if DEFAULT_RULES_DIR.is_dir():
+        return DEFAULT_RULES_DIR
+    # installed as a wheel: the bundled default rules ship next to the package
+    bundled = Path(__file__).parent / "rules_defaults"
+    return bundled if bundled.is_dir() else None
+
+
+def _rules_with_auto(rules_dir: Path | None) -> list[Rule]:
+    """Configured rules plus the built-in auto rule as a baseline.
+
+    Every entry point must apply the same rule set, otherwise /api/compare
+    would judge fewer columns than /api/jobs for identical inputs.
+    """
+    rules = load_rules(rules_dir)
+    if not any(rule.id == DEFAULT_RULE["id"] for rule in rules):
+        rules = [*rules, Rule.from_dict(DEFAULT_RULE)]
+    return rules
+
+
+def _validate_job_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Validate the job config shape; reject malformed match_on/normalize."""
+    match_on = cfg.get("match_on")
+    if match_on is not None and not (
+        isinstance(match_on, list) and all(isinstance(c, str) for c in match_on)
+    ):
+        raise HTTPException(status_code=400, detail="config.match_on must be a list of strings")
+    normalize = cfg.get("normalize")
+    if normalize is not None and not (
+        isinstance(normalize, dict)
+        and all(isinstance(k, str) and isinstance(v, str) for k, v in normalize.items())
+    ):
+        raise HTTPException(status_code=400, detail="config.normalize must be {column: kind}")
+    if normalize and any(v not in _NORMALIZE_KINDS for v in normalize.values()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"config.normalize kind must be one of {sorted(_NORMALIZE_KINDS)}",
+        )
+    out = dict(cfg)
+    if match_on is not None:
+        out["match_on"] = [c for c in match_on]
+    if normalize is not None:
+        out["normalize"] = dict(normalize)
+    return out
 
 
 class JobStore:
@@ -116,9 +158,17 @@ class JobStore:
                     pass
 
     def queued_jobs(self) -> list[str]:
-        """Jobs that were queued but not finished (replayed after a restart)."""
+        """Jobs that were interrupted (queued or running): replayed after a restart.
+
+        A ``running`` job can only be running at load time if the process died
+        mid-batch, so it is safe — and necessary — to resume it.
+        """
         with self._lock:
-            return [jid for jid, job in self._jobs.items() if job.get("status") == "queued"]
+            return [
+                jid
+                for jid, job in self._jobs.items()
+                if job.get("status") in ("queued", "running")
+            ]
 
     def active_job_ids(self) -> set[str]:
         """Jobs still being worked on — their files must never be pruned."""
@@ -133,7 +183,8 @@ class JobStore:
         ttl: int | None = None,
         active: set[str] | None = None,
     ) -> int:
-        """Delete job file dirs and reports older than ``ttl``; returns count."""
+        """Delete job file dirs, reports and aborted tmp dirs older than ``ttl``;
+        also prune the job index. Returns the number of removed items."""
         now = now if now is not None else time.time()
         ttl = ttl if ttl is not None else _ttl_seconds()
         active = active if active is not None else self.active_job_ids()
@@ -154,7 +205,37 @@ class JobStore:
                     removed += 1
             except OSError:
                 continue
+        # aborted synchronous uploads land in <root>/tmp — they are never
+        # replayed, so expire them like any other temporary artefact
+        tmp_dir = self.root / "tmp"
+        if tmp_dir.is_dir():
+            for d in tmp_dir.iterdir():
+                if not d.is_dir():
+                    continue
+                try:
+                    if now - d.stat().st_mtime > ttl:
+                        shutil.rmtree(d, ignore_errors=True)
+                        removed += 1
+                except OSError:
+                    continue
+        removed += self._prune_index(now, ttl, active)
         return removed
+
+    def _prune_index(self, now: float, ttl: int, active: set[str]) -> int:
+        """Drop finished jobs whose records expired from the in-memory index."""
+        with self._lock:
+            stale = [
+                jid
+                for jid, job in self._jobs.items()
+                if jid not in active
+                and job.get("status") == "done"
+                and now - (job.get("finished_at") or 0) > ttl
+            ]
+            for jid in stale:
+                self._jobs.pop(jid, None)
+            if stale:
+                self._persist()
+        return len(stale)
 
     def create_job(self, job: dict[str, Any]) -> None:
         with self._lock:
@@ -211,6 +292,8 @@ class JobStore:
 # ---------------------------------------------------------------------------
 # filename heuristics: guess document kind, derive the grouping key
 # ---------------------------------------------------------------------------
+
+_NORMALIZE_KINDS = {"part_no", "entity", "raw"}
 
 _KIND_TOKENS: dict[str, tuple[str, ...]] = {
     # purchase chain
@@ -372,10 +455,7 @@ class Worker:
         know; ``evaluate`` already de-duplicates columns an explicit rule
         covers for the same pair.
         """
-        rules = load_rules(self.rules_dir)
-        if not any(rule.id == DEFAULT_RULE["id"] for rule in rules):
-            rules = [*rules, Rule.from_dict(DEFAULT_RULE)]
-        return rules
+        return _rules_with_auto(self.rules_dir)
 
     def _process(self, job_id: str) -> None:
         job = self.store.get_job(job_id)
@@ -385,10 +465,17 @@ class Worker:
         by_name = {entry["name"]: entry for entry in job["files"]}
         pairs = job["pairs"]
         rule_list = self._rules_for()
+        parsed: dict[str, Document] = {}  # parse each distinct file once per job
         for i, pair in enumerate(pairs):
             try:
-                left_doc = self._load_entry(by_name[pair["left"]])
-                right_doc = self._load_entry(by_name[pair["right"]])
+                left_entry = by_name[pair["left"]]
+                right_entry = by_name[pair["right"]]
+                left_doc = parsed.setdefault(
+                    pair["left"], self._load_entry(left_entry)
+                )
+                right_doc = parsed.setdefault(
+                    pair["right"], self._load_entry(right_entry)
+                )
                 report, _findings = compare_documents(
                     left_doc,
                     right_doc,
@@ -422,14 +509,18 @@ class Worker:
 
 
 def _auth_dependency(api_key: str | None):
+    import hmac
+
     def require_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")):
-        if api_key and x_api_key != api_key:
+        if api_key and not hmac.compare_digest(x_api_key or "", api_key):
             raise HTTPException(status_code=401, detail="missing or invalid X-API-Key")
 
     return require_key
 
 
 def _require_datasource(store_id: str, sources: list[DataSource]) -> DataSource:
+    if not re.fullmatch(r"[a-z0-9]{6,16}", store_id or ""):
+        raise HTTPException(status_code=404, detail="data source not found")
     for source in sources:
         if source.id == store_id:
             return source
@@ -479,7 +570,7 @@ def create_app(
 
     # ------------------------------------------------------------- compare
     @api.post("/compare")
-    async def compare(
+    def compare(
         files: list[UploadFile] | None = File(default=None),
         doc_ids: str = Form(""),
     ) -> JSONResponse:
@@ -505,10 +596,11 @@ def create_app(
             paths: list[Path] = []
             try:
                 for i, upload in enumerate(files):
-                    target = tmp / _SAFE_NAME.sub("_", upload.filename or f"file_{i}")
+                    safe = _SAFE_NAME.sub("_", upload.filename or f"file_{i}")
+                    target = tmp / f"{i:02d}_{safe}"
                     total = 0
                     with target.open("wb") as out:
-                        while chunk := await upload.read(1024 * 1024):
+                        while chunk := upload.file.read(1024 * 1024):
                             total += len(chunk)
                             if total > MAX_UPLOAD_BYTES:
                                 raise HTTPException(
@@ -520,24 +612,21 @@ def create_app(
             except ReconCheckError as err:
                 raise HTTPException(status_code=422, detail=str(err)) from err
             finally:
-                for p in paths:
-                    p.unlink(missing_ok=True)
-                if tmp.exists():
-                    tmp.rmdir()
+                shutil.rmtree(tmp, ignore_errors=True)
         if len(docs) != 2:
             raise HTTPException(
                 status_code=400,
                 detail="exactly two documents are required (2 files or 2 doc_ids)",
             )
         try:
-            report, _findings = compare_documents(docs[0], docs[1], rules=rules_dir)
+            report, _findings = compare_documents(docs[0], docs[1], rules=_rules_with_auto(rules_dir))
             return JSONResponse(report)
         except ReconCheckError as err:
             raise HTTPException(status_code=422, detail=str(err)) from err
 
     # ------------------------------------------------------- compare3
     @api.post("/compare3")
-    async def compare3(
+    def compare3(
         files: list[UploadFile] | None = File(default=None),
         doc_ids: str = Form(""),
     ) -> JSONResponse:
@@ -564,10 +653,11 @@ def create_app(
             paths: list[Path] = []
             try:
                 for i, upload in enumerate(files):
-                    target = tmp / _SAFE_NAME.sub("_", upload.filename or f"file_{i}")
+                    safe = _SAFE_NAME.sub("_", upload.filename or f"file_{i}")
+                    target = tmp / f"{i:02d}_{safe}"
                     total = 0
                     with target.open("wb") as out:
-                        while chunk := await upload.read(1024 * 1024):
+                        while chunk := upload.file.read(1024 * 1024):
                             total += len(chunk)
                             if total > MAX_UPLOAD_BYTES:
                                 raise HTTPException(
@@ -579,24 +669,21 @@ def create_app(
             except ReconCheckError as err:
                 raise HTTPException(status_code=422, detail=str(err)) from err
             finally:
-                for p in paths:
-                    p.unlink(missing_ok=True)
-                if tmp.exists():
-                    tmp.rmdir()
+                shutil.rmtree(tmp, ignore_errors=True)
         if len(docs) != 3:
             raise HTTPException(
                 status_code=400,
                 detail="exactly three documents are required (3 files or 3 doc_ids)",
             )
         try:
-            report = compare_three(docs, rules=rules_dir)
+            report = compare_three(docs, rules=_rules_with_auto(rules_dir))
             return JSONResponse(report)
         except ReconCheckError as err:
             raise HTTPException(status_code=422, detail=str(err)) from err
 
     # --------------------------------------------------------------- jobs
     @api.post("/jobs")
-    async def create_job(
+    def create_job(
         files: list[UploadFile] | None = File(default=None),
         config: str = Form("{}"),
         doc_ids: str = Form(""),
@@ -607,6 +694,7 @@ def create_app(
                 raise ValueError
         except (json.JSONDecodeError, ValueError) as err:
             raise HTTPException(status_code=400, detail="config must be a JSON object") from err
+        cfg = _validate_job_config(cfg)
 
         job_id = uuid.uuid4().hex[:12]
         used_names: set[str] = set()
@@ -755,12 +843,12 @@ def create_app(
         return {"documents": documents.list()}
 
     @api.post("/documents")
-    async def register_documents(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    def register_documents(files: list[UploadFile] = File(...)) -> dict[str, Any]:
         created: list[dict[str, Any]] = []
         for upload in files:
             name = upload.filename or "unnamed"
             data = bytearray()
-            while chunk := await upload.read(1024 * 1024):
+            while chunk := upload.file.read(1024 * 1024):
                 if len(data) + len(chunk) > MAX_UPLOAD_BYTES:
                     raise HTTPException(status_code=413, detail=f"{name}: file too large")
                 data.extend(chunk)
@@ -859,7 +947,7 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(err)) from err
 
     @api.post("/datasources/{ds_id}/fetch")
-    async def fetch_from_datasource(
+    def fetch_from_datasource(
         ds_id: str, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         source = _require_datasource(ds_id, load_datasources(root))
@@ -883,6 +971,10 @@ def create_app(
                 doc_id = documents.register(name, data, source="datasource", datasource_id=ds_id)
         except HTTPError as err:
             raise HTTPException(status_code=502, detail=f"fetch failed: {err}") from err
+        except ValueError as err:  # undecodable JSON from a records endpoint
+            raise HTTPException(
+                status_code=422, detail=f"data source reply is not valid JSON: {err}"
+            ) from err
         meta = documents.get(doc_id)
         if meta is None:
             raise HTTPException(status_code=500, detail="document registration failed")

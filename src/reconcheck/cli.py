@@ -36,6 +36,9 @@ def run_compare(args: argparse.Namespace) -> int:
     except (ReconCheckError, OSError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
+    except (ValueError, TypeError) as err:  # malformed rule YAML surfaces here
+        print(f"error: invalid rules configuration: {err}", file=sys.stderr)
+        return 2
     if args.output:
         write_json(report, args.output)
         print(f"wrote {args.output}")

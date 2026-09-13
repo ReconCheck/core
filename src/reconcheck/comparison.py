@@ -89,6 +89,33 @@ def _within_tolerance(a: Any, b: Any, rel: float, abs_: float) -> bool:
     return abs(x - y) <= Decimal(str(abs_)) + Decimal(str(rel)) * max(abs(x), abs(y), Decimal(1))
 
 
+def _pair_consistent(
+    ai: int,
+    bi: int,
+    *,
+    cells: list[Any],
+    texts: list[str],
+    values: list[Any],
+    based: list[Any],
+    rel: float,
+    abs_: float,
+    exceptions: list[Any],
+) -> bool:
+    """One three-way pair judged with the same exception semantics as the
+    pairwise pipeline: exempt wins, text_differs loses, otherwise numeric
+    (tolerance + unit-aligned) or case-insensitive text equality."""
+    from .rules import _exception_verdict
+
+    verdict = _exception_verdict(exceptions, cells[ai], cells[bi])
+    if verdict == "exempt":
+        return True
+    if verdict == "text_differs":
+        return False
+    if values[ai] is not None and values[bi] is not None:
+        return _within_tolerance(based[ai], based[bi], rel, abs_)
+    return texts[ai].lower() == texts[bi].lower()
+
+
 def compare_three(
     docs: list[Document],
     rules: str | Path | list[Rule] | None = None,
@@ -145,6 +172,17 @@ def _default_threeway_key(match_on: list[str] | None, tables: list[Any]) -> list
     return [tables[0].headers[0]]
 
 
+def _exceptions_for(field: str, rules: list[Rule]) -> list[dict[str, Any]]:
+    """Exceptions every rule declares for ``field`` (three-way must judge with
+    the same exception semantics as the pairwise pipeline)."""
+    out: list[dict[str, Any]] = []
+    for rule in rules:
+        cols = [rule.compare] if isinstance(rule.compare, str) else (rule.compare or [])
+        if field in cols:
+            out.extend(rule.exceptions)
+    return out
+
+
 def _three_way_conflicts(
     tables: list[Any],
     names: list[str],
@@ -185,67 +223,71 @@ def _three_way_conflicts(
                 continue
             texts = [(cell.text or "").strip() for cell in cells]
             values = [cell.value for cell in cells]
-            if all(value is not None for value in values):
-                # align units to the first side before comparing (5 kg vs 5000 g)
-                units = [cell.unit for cell in cells]
-                based = values[:]
-                if any(u for u in units):
-                    converted = [
-                        (
-                            convert(v, u, units[0])
-                            if u and units[0] and u != units[0] and v is not None
-                            else v
-                        )
-                        for v, u in zip(values, units, strict=True)
-                    ]
-                    if all(c is not None for c in converted):
-                        based = converted
-                rel, abs_ = _tolerance_for(field, rules)
-                equal = [
-                    _within_tolerance(based[a], based[b], rel, abs_)
-                    for a in range(3)
-                    for b in range(a + 1, 3)
-                ]
-                consistent = all(equal)
-                if consistent:
-                    continue
-                # majority: index is a non-outlier if it agrees with >= 1 other
-                agree = [
-                    sum(
-                        1
-                        for b in range(3)
-                        if b != a and _within_tolerance(based[a], based[b], rel, abs_)
-                    )
-                    for a in range(3)
-                ]
-                outliers = [a for a in range(3) if agree[a] == 0]
-                conflicts.append(
-                    {
-                        "key": dict(zip(match_on, key, strict=False)) if match_on else {"line": key},
-                        "field": field,
-                        "values": {names[a]: texts[a] for a in range(3)},
-                        "consistent": False,
-                        "outlier_indices": outliers or [0, 1, 2],
-                        "severity": "high" if outliers else "medium",
-                    }
+            units = [cell.unit for cell in cells]
+
+            based = list(values)
+            anchor = next((u for u in units if u), None)
+            if anchor and any(units):
+                # convert to the first stated unit; cells with no unit keep
+                # their number (they read as already-anchored, e.g. OCR/CSV
+                # dumps that lost the suffix) — 5 vs 5000 g is *not* a
+                # conflict just because doc[0] says "5" without a unit
+                converted: list[Any] = []
+                ok_convert = True
+                for v, u in zip(values, units, strict=True):
+                    if v is None:
+                        ok_convert = False
+                        break
+                    if u and u != anchor:
+                        c = convert(v, u, anchor)
+                        if c is None:
+                            ok_convert = False
+                            break
+                        converted.append(c)
+                    else:
+                        converted.append(v)
+                if ok_convert:
+                    based = converted
+
+            rel, abs_ = _tolerance_for(field, rules)
+            exceptions = _exceptions_for(field, rules)
+
+            ok: dict[tuple[int, int], bool] = {
+                (a, b): _pair_consistent(
+                    a,
+                    b,
+                    cells=cells,
+                    texts=texts,
+                    values=values,
+                    based=based,
+                    rel=rel,
+                    abs_=abs_,
+                    exceptions=exceptions,
                 )
-            else:
-                lowered = {t.lower() for t in texts}
-                if len(lowered) == 1:
-                    continue
-                counts: dict[str, list[int]] = {}
-                for a, t in enumerate(texts):
-                    counts.setdefault(t.lower(), []).append(a)
-                majority = max(counts.values(), key=len)
-                outliers = [a for a in range(3) if a not in majority]
-                conflicts.append(
-                    {
-                        "key": dict(zip(match_on, key, strict=False)) if match_on else {"line": key},
-                        "field": field,
-                        "values": {names[a]: texts[a] for a in range(3)},
-                        "consistent": False,
-                        "outlier_indices": outliers,
-                        "severity": "medium",
-                    }
-                )
+                for a in range(3)
+                for b in range(a + 1, 3)
+            }
+            if all(ok.values()):
+                continue
+            # majority: index is a non-outlier if it agrees with >= 1 other
+            agree = [
+                sum(ok.get((min(a, b), max(a, b)), True) for b in range(3) if b != a)
+                for a in range(3)
+            ]
+            outliers = [a for a in range(3) if agree[a] == 0]
+            numeric_mismatch = any(
+                values[a] is not None and values[b] is not None and not consistent
+                for (a, b), consistent in ok.items()
+                if not consistent
+            )
+            conflicts.append(
+                {
+                    "key": dict(zip(match_on, key, strict=False)) if match_on else {"line": key},
+                    "field": field,
+                    "values": {names[a]: texts[a] for a in range(3)},
+                    "consistent": False,
+                    "outlier_indices": outliers or [0, 1, 2],
+                    "severity": "high" if numeric_mismatch else "medium",
+                }
+            )
     return conflicts

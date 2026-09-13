@@ -35,6 +35,9 @@ reconcheck = "reconcheck.cli:main"
 reconcheck-api = "reconcheck.web.app:run"
 
 [tool.hatch.build.targets.wheel]
+# hatcling's packages target bundles non-.py files inside the package too
+# (web/static UI, rules_defaults), verified in the wheel build — do NOT add a
+# force-include for them or they get archived twice
 packages = ["src/reconcheck"]
 
 [tool.pytest.ini_options]

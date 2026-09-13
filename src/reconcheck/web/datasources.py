@@ -15,16 +15,71 @@ are stored in the local data directory and never echoed by the API.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
+import re
+import socket
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlparse
 
 import httpx
 
 DEFAULT_TIMEOUT = httpx.Timeout(20.0)
 MAX_BYTES = 50 * 1024 * 1024  # 50 MB per fetched file (streaming cap)
+PROBE_BYTES = 64 * 1024  # connectivity probe reads only this much
+SAFE_DS_ID = re.compile(r"^[a-z0-9]{6,16}$")
+
+
+def guard_url(url: str, allow_private: bool | None = None) -> str | None:
+    """Return a reason string when ``url`` is not a safe fetch target (SSRF guard).
+
+    Only http(s) is allowed, and the target must resolve to public addresses —
+    loopback, private, link-local (169.254.0.0/16 incl. cloud metadata),
+    multicast, reserved and unspecified addresses are all blocked.
+
+    ``RECONCHECK_ALLOW_PRIVATE_FETCH=1`` disables the address check for
+    operator-run environments that genuinely reach intranet endpoints (the
+    loopback test server also needs it); the scheme check always applies.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return "malformed URL"
+    if parsed.scheme not in ("http", "https"):
+        return f"unsupported scheme {parsed.scheme!r} (http/https only)"
+    if allow_private is None:
+        allow_private = os.environ.get("RECONCHECK_ALLOW_PRIVATE_FETCH") == "1"
+    if allow_private:
+        return None
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return "URL has no host"
+    if host == "localhost" or host.endswith(".localhost"):
+        return "loopback target is blocked"
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return f"cannot resolve {host}"
+    for info in infos:
+        ip = (info[4][0] or "").split("%")[0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+            or addr.is_multicast
+            or addr.is_unspecified
+        ):
+            return f"target resolves to a non-public address ({ip})"
+    return None
 
 
 class _CappedResponse:
@@ -99,8 +154,11 @@ class DataSource:
     @classmethod
     def from_dict(cls, payload: dict[str, Any], existing_id: str | None = None) -> DataSource:
         raw_token = payload.get("token")
+        raw_id = payload.get("id") or existing_id or uuid.uuid4().hex[:10]
+        if not SAFE_DS_ID.fullmatch(str(raw_id)):
+            raise ValueError(f"data source id {str(raw_id)[:20]!r} is not allowed")
         return cls(
-            id=payload.get("id") or existing_id or uuid.uuid4().hex[:10],
+            id=str(raw_id),
             name=str(payload.get("name", "")).strip(),
             type=str(payload.get("type", "file")),
             url=str(payload.get("url", "")).strip(),
@@ -119,31 +177,51 @@ class DataSource:
     def headers_for(self) -> dict[str, str]:
         headers = dict(self.headers)
         if self.auth == "bearer" and self.token:
-            headers.setdefault("Authorization", f"Bearer {self.token}")
+            headers["Authorization"] = f"Bearer {self.token}"
         elif self.auth == "header" and self.token and self.header_name:
-            headers.setdefault(self.header_name, self.token)
+            headers[self.header_name] = self.token
         return headers
 
     def url_for(self, record_id: str | None = None, listing: bool = False) -> str:
         url = (self.list_url if listing and self.list_url else self.url).strip()
         if record_id and "{id}" in url:
-            url = url.replace("{id}", record_id)
+            # quote so a record id cannot smuggle path/query characters
+            url = url.replace("{id}", quote(record_id, safe=""))
         return url
 
-    def _request(self, record_id: str | None = None, listing: bool = False) -> _CappedResponse:
+    def _request(
+        self,
+        record_id: str | None = None,
+        listing: bool = False,
+        max_bytes: int | None = None,
+        raise_on_cap: bool = True,
+    ) -> _CappedResponse:
         """GET/POST the endpoint, streaming the body with a hard size cap."""
+        if max_bytes is None:
+            max_bytes = MAX_BYTES  # read at call time so tests can patch the constant
         url = self.url_for(record_id, listing=listing)
+        blocked = guard_url(url)
+        if blocked:
+            raise httpx.RequestError(f"blocked target: {blocked}", request=httpx.Request("GET", url))
         with httpx.Client(timeout=DEFAULT_TIMEOUT, follow_redirects=True) as client:
             with client.stream(self.method, url, headers=self.headers_for()) as resp:
+                # a redirect may have landed somewhere the guard rejected
+                redirected = guard_url(str(resp.url))
+                if redirected:
+                    raise httpx.RequestError(
+                        f"redirected to blocked target: {redirected}", request=resp.request
+                    )
                 chunks: list[bytes] = []
                 total = 0
                 for chunk in resp.iter_bytes():
                     total += len(chunk)
-                    if total > MAX_BYTES:
-                        raise httpx.RequestError(
-                            f"response too large (> {MAX_BYTES} bytes): {url}",
-                            request=resp.request,
-                        )
+                    if total > max_bytes:
+                        if raise_on_cap:
+                            raise httpx.RequestError(
+                                f"response too large (> {max_bytes} bytes): {url}",
+                                request=resp.request,
+                            )
+                        break  # probe/peek: keep what we read
                     chunks.append(chunk)
                 return _CappedResponse(
                     resp.request, resp.status_code, resp.headers, b"".join(chunks)
@@ -196,9 +274,9 @@ class DataSource:
         return out
 
     def probe(self) -> dict[str, Any]:
-        """Connectivity test used by the frontend 'test' button."""
+        """Connectivity test used by the frontend 'test' button (bounded read)."""
         try:
-            r = self._request()
+            r = self._request(max_bytes=min(MAX_BYTES, PROBE_BYTES), raise_on_cap=True)
             ok = 200 <= r.status_code < 300
             return {
                 "ok": ok,
@@ -250,8 +328,13 @@ def save_datasources(root: Path, sources: list[DataSource]) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     seen: set[str] = set()
     for source in sources:
-        seen.add(source.id)
-        (folder / f"{source.id}.json").write_text(
+        # belt and braces: the id is validated upstream, but the filename is
+        # the final authority — never let an id escape the json file namespace
+        stem = re.sub(r"[^a-z0-9]", "", source.id)
+        if not stem:
+            stem = uuid.uuid4().hex[:10]
+        seen.add(stem)
+        (folder / f"{stem}.json").write_text(
             json.dumps(source.to_dict(mask=False), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )

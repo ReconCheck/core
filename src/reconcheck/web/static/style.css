@@ -92,6 +92,8 @@ h2 { font-size: 17px; margin: 0 0 12px; }
   color: #fff; white-space: nowrap;
 }
 .badge.po { background: #6b4bd6; }
+.badge.so { background: #b357a8; }
+.badge.outbound { background: #2e7d32; }
 .badge.invoice { background: #0f9d8f; }
 .badge.delivery { background: #c26a1e; }
 .badge.unknown { background: #9aa7b5; }

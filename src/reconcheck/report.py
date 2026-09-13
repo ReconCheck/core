@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,11 @@ def build_report(
         "aligned_rows": aligned_pairs,
     }
     for finding in findings:
-        summary[str(finding.severity)] += 1
+        key = str(finding.severity)
+        if key in summary:
+            summary[key] += 1
+        else:  # a future severity level must not crash report assembly
+            summary[key] = 1
     return {
         "engine": {"name": "reconcheck", "version": __version__},
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -84,7 +90,15 @@ def build_threeway_report(
 def write_json(report: dict[str, Any], path: str | Path) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    payload = json.dumps(report, ensure_ascii=False, indent=2)
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        os.replace(tmp, target)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

@@ -1,0 +1,11 @@
+# Base rule: invoice amounts should match the purchase order within tolerance.
+id: po-invoice-amount-mismatch
+applies_to: [purchase_order, invoice]
+severity: medium
+match_on: [料号]
+compare: 金额
+tolerance:
+  relative: 0.001
+  absolute: 0.01
+evidence:
+  require: both_sides

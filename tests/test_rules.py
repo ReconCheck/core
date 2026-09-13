@@ -1,3 +1,6 @@
+from decimal import Decimal
+from pathlib import Path
+
 from conftest import make_table
 from reconcheck.align import align
 from reconcheck.models import Severity, Table
@@ -120,3 +123,75 @@ def test_auto_rule_reports_columns_explicit_rules_leave_alone():
     findings = evaluate(rules, left, right, pairs)
     assert [f.field for f in findings] == ["amt"]
     assert findings[0].rule_id == DEFAULT_RULE["id"]
+
+
+# ------------------------------------------------------------------ config robustness
+
+
+def test_rule_from_dict_string_match_on_is_wrapped():
+    """YAML `match_on: 料号` (scalar) must not be split into single characters."""
+    rule = Rule.from_dict({"id": "r", "match_on": "料号", "compare": "v"})
+    assert rule.match_on == ["料号"]
+
+
+def test_rule_from_dict_null_tolerance_falls_back_to_defaults():
+    rule = Rule.from_dict({"id": "r", "tolerance": {"relative": None, "absolute": None}})
+    assert rule.tolerance["relative"] == Decimal("0.001")
+    assert rule.tolerance["absolute"] == Decimal("0.01")
+
+
+def test_rule_from_dict_invalid_severity_rejected():
+    try:
+        Rule.from_dict({"id": "r", "severity": "urgent"})
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_load_rules_rejects_invalid_yaml(tmp_path: Path):
+    (tmp_path / "bad.yaml").write_text("not: [valid\n", encoding="utf-8")
+    try:
+        load_rules(tmp_path)
+        raise AssertionError("expected ValueError")
+    except ValueError as err:
+        assert "bad.yaml" in str(err)
+
+
+def test_load_rules_rejects_rule_without_id(tmp_path: Path):
+    (tmp_path / "r.yaml").write_text("severity: high\ncompare: v\n", encoding="utf-8")
+    try:
+        load_rules(tmp_path)
+        raise AssertionError("expected ValueError")
+    except ValueError as err:
+        assert "r.yaml" in str(err)
+
+
+def test_exception_aggregation_rounding_survives_text_exception():
+    """A failing text exception must not short-circuit a later rounding exemption."""
+    left = make_table(["id", "v"], [{"id": "1", "v": "10.015"}])
+    right = make_table(["id", "v"], [{"id": "1", "v": "10.016"}])
+    rule = Rule(
+        id="r",
+        compare="v",
+        tolerance={"absolute": 0, "relative": 0},
+        exceptions=[
+            {"when": {"text_equal_ignore_case": True}},
+            {"when": {"rounding": {"decimals": 2}}},
+        ],
+    )
+    pairs = align(left, right, match_on=["id"])
+    assert evaluate([rule], left, right, pairs) == []
+
+
+def test_text_exception_flags_differing_text_even_within_tolerance():
+    """A claiming text exception reports text differences the numbers hide."""
+    left = make_table(["id", "v"], [{"id": "1", "v": "10.01"}])
+    right = make_table(["id", "v"], [{"id": "1", "v": "10.03"}])
+    rule = Rule(
+        id="r",
+        compare="v",
+        tolerance={"absolute": "0.1", "relative": 0},
+        exceptions=[{"when": {"text_equal_ignore_case": True}}],
+    )
+    pairs = align(left, right, match_on=["id"])
+    assert len(evaluate([rule], left, right, pairs)) == 1

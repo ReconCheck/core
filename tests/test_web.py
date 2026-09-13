@@ -1,5 +1,6 @@
 """Web layer tests: REST API, async jobs, auth."""
 
+import json
 import os
 import time
 from pathlib import Path
@@ -317,3 +318,40 @@ def test_jobstore_cleanup_ttl(tmp_path: Path):
     assert not expired_dir.exists() and not expired_report.exists()
     assert active_dir.exists()
     assert fresh_dir.exists()
+
+
+def test_compare_sync_same_name_different_content(tmp_path: Path):
+    """Two uploads with the same filename must not overwrite each other: the
+    first file was previously clobbered, turning the pair into a self-compare
+    that silently reported everything as matching."""
+    with _client(tmp_path) as client:
+        r = client.post(
+            "/api/compare",
+            files=[
+                ("files", ("dup.csv", b"id,amount\n1,100.00\n", "text/csv")),
+                ("files", ("dup.csv", b"id,amount\n1,99.50\n", "text/csv")),
+            ],
+        )
+        assert r.status_code == 200
+        report = r.json()
+        assert report["summary"]["aligned_rows"] == 1
+        assert report["summary"]["total"] == 1  # 0.50 is outside tolerance
+
+
+def test_create_job_rejects_malformed_config(tmp_path: Path):
+    def _post(config):
+        with _client(tmp_path) as client:
+            return client.post(
+                "/api/jobs",
+                data={"config": json.dumps(config)},
+                files=[
+                    ("files", ("PO-240913-001.csv", b"id,v\n1,2\n", "text/csv")),
+                    ("files", ("INV-240913-001.csv", b"id,v\n1,3\n", "text/csv")),
+                ],
+            )
+
+    assert _post({"match_on": "id"}).status_code == 400  # must be a list
+    assert _post({"match_on": [1, 2]}).status_code == 400  # and all strings
+    assert _post({"normalize": []}).status_code == 400  # must be a dict
+    assert _post({"normalize": {"id": "bogus-kind"}}).status_code == 400
+    assert _post({"match_on": ["id"], "normalize": {"id": "part_no"}}).status_code == 200

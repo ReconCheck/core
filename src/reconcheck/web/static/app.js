@@ -45,11 +45,41 @@ function fmtSize(n) {
   return (n / (1024 * 1024)).toFixed(1) + " MB";
 }
 
+/* ===== API key (optional auth): stored locally, sent with every /api call ===== */
+const KEY_STORAGE = "reconcheck_api_key";
+
+function storedKey() {
+  try { return localStorage.getItem(KEY_STORAGE) || ""; } catch { return ""; }
+}
+
+function setKeyPrompt() {
+  const cur = storedKey();
+  const key = prompt(
+    "ReconCheck API 要求 X-API-Key 鉴权。\n输入 API 密钥（留空 = 清除）：",
+    cur,
+  );
+  if (key === null) return cur; // cancelled → keep whatever was there
+  const cleaned = key.trim();
+  try {
+    if (cleaned) localStorage.setItem(KEY_STORAGE, cleaned);
+    else localStorage.removeItem(KEY_STORAGE);
+  } catch { /* private mode: never persists, still applies to this page */ }
+  window.__rcKey = cleaned;
+  return cleaned;
+}
+
 async function api(path, opts = {}) {
-  const resp = await fetch(path, opts);
+  const headers = { ...(opts.headers || {}) };
+  const key = window.__rcKey || storedKey();
+  if (key) headers["X-API-Key"] = key;
+  const resp = await fetch(path, { ...opts, headers });
   let body = {};
   try { body = await resp.json(); } catch { /* non-JSON body */ }
   if (!resp.ok) {
+    if (resp.status === 401 && !opts._rkRetry) {
+      const k = setKeyPrompt();
+      if (k) return api(path, { ...opts, _rkRetry: true });
+    }
     const detail = Array.isArray(body.detail)
       ? body.detail.map((d) => (d && d.msg) || JSON.stringify(d)).join("；")
       : (body.detail || body.error || `HTTP ${resp.status}`);
@@ -63,6 +93,7 @@ function friendly(msg) {
     [/no comparable pairs found/i, "没有可配对的单据：文件名需要包含相同的业务编号，且每组至少两份"],
     [/at least two distinct documents/i, "至少需要两份不同的单据才能比对"],
     [/exactly two documents are required/i, "比对需要正好两份单据"],
+    [/exactly three documents are required/i, "三方核对需要正好三份单据"],
     [/cannot compare a document with itself/i, "不能拿同一份单据和自己比对"],
     [/empty upload/i, "上传的是空文件"],
     [/file too large/i, "文件超过 64MB 上限"],
@@ -71,6 +102,9 @@ function friendly(msg) {
     [/no files or documents provided/i, "没有收到任何文件或文档"],
     [/ocr|scanned/i, "该 PDF 没有文本层（扫描件）：OCR 尚未接入，请改用带文本层的 PDF 或表格文件"],
     [/fetch failed/i, "从数据源拉取失败（网络或接口错误）"],
+    [/blocked target/i, "数据源目标被拦截（仅允许公网 http/https，禁止内网/回环地址）"],
+    [/valid JSON/i, "数据源返回的不是合法 JSON"],
+    [/failed to fetch/i, "网络请求失败（服务不可达或跨域）"],
   ];
   for (const [re, text] of map) if (re.test(msg)) return text;
   return msg;
@@ -91,16 +125,20 @@ document.querySelectorAll(".tab").forEach((btn) => {
 const state = { files: [], job: null, pollTimer: null };
 
 /* ============================ health ============================ */
-fetch("/api/health")
-  .then((r) => r.json())
-  .then((h) => {
-    $("#health").classList.add("ok");
-    $("#healthText").textContent = `引擎 v${h.version} · 服务正常`;
-  })
-  .catch(() => {
-    $("#health").classList.add("bad");
-    $("#healthText").textContent = "API 不可用";
-  });
+(function checkHealth() {
+  const key = storedKey();
+  const headers = key ? { "X-API-Key": key } : {};
+  fetch("/api/health", { headers })
+    .then((r) => r.json())
+    .then((h) => {
+      $("#health").classList.add("ok");
+      $("#healthText").textContent = `引擎 v${h.version} · 服务正常`;
+    })
+    .catch(() => {
+      $("#health").classList.add("bad");
+      $("#healthText").textContent = "API 不可用";
+    });
+})();
 
 /* ===================== view: compare ===================== */
 const dz = $("#dropzone");
@@ -221,7 +259,18 @@ runBtn.addEventListener("click", async () => {
 
 function startPolling() {
   progressText.textContent = "排队中…";
+  const jobId = state.job.id;
+  const startedAt = Date.now();
   state.pollTimer = setInterval(async () => {
+    if (!state.job || state.job.id !== jobId) {
+      clearInterval(state.pollTimer); // a newer submission superseded this one
+      return;
+    }
+    if (Date.now() - startedAt > 10 * 60 * 1000) {
+      clearInterval(state.pollTimer);
+      fail("任务超时（10 分钟未完成），请检查服务日志");
+      return;
+    }
     try {
       const job = await api(`/api/jobs/${state.job.id}`);
       state.job = job;
@@ -264,20 +313,30 @@ async function showResults(job) {
   runBtn.disabled = false;
   clearBtn.disabled = false;
 
+  // display the original filenames: the server renames duplicates with -2,
+  // keep that internal name out of the UI
+  const displayName = {};
+  for (const f of job.files || []) displayName[f.name] = f.orig_name || f.name;
+
   const totals = { total: 0, high: 0, medium: 0, low: 0 };
   const loaded = [];
   for (const pair of job.pairs) {
+    const shown = {
+      ...pair,
+      left: displayName[pair.left] || pair.left,
+      right: displayName[pair.right] || pair.right,
+    };
     if (pair.status === "done" && pair.report_id) {
       try {
         const r = await api(`/api/reports/${pair.report_id}`);
-        loaded.push({ pair, report: r });
+        loaded.push({ pair: shown, report: r });
         totals.total += r.summary.total;
         totals.high += r.summary.high;
         totals.medium += r.summary.medium;
         totals.low += r.summary.low;
       } catch { /* one bad report must not kill the page */ }
     } else {
-      loaded.push({ pair, report: null });
+      loaded.push({ pair: shown, report: null });
     }
   }
 
@@ -346,6 +405,11 @@ function makePair(pair, report) {
   body.className = "pair-body";
   sec.appendChild(head);
   sec.appendChild(body);
+  if (pair.status === "done" && !report) {
+    body.innerHTML = `<p style="color:var(--high)">报告获取失败（` +
+      `report_id=${esc(pair.report_id)} — 报告可能已被 TTL 清理或存储损坏）。</p>`;
+    sec.dataset.rendered = "1";
+  }
   return sec;
 }
 
@@ -441,40 +505,45 @@ async function refreshExt() {
   await Promise.all([refreshDsList(), refreshDocList()]);
 }
 
-async function refreshDsList() {
+function refreshDsList() {
   const ul = $("#dsList");
-  try {
-    const { datasources } = await api("/api/datasources");
-    if (!datasources.length) {
-      ul.innerHTML = `<li class="empty">尚未配置数据源</li>`;
-      return;
-    }
-    ul.innerHTML = "";
-    for (const ds of datasources) {
-      const li = document.createElement("li");
-      li.innerHTML =
-        `<div class="ds-info">` +
-        `<span class="ds-name">${esc(ds.name)}</span>` +
-        `<span class="badge ${ds.type}">${ds.type === "file" ? "文件流" : "记录 JSON"}</span>` +
-        `<span class="badge unknown">${ds.auth}</span>` +
-        `<div class="ds-url">${esc(ds.url)}</div>` +
-        `</div>` +
-        `<div class="ds-actions">` +
-        `<button class="ghost small" data-act="probe">测试</button>` +
-        `<button class="ghost small" data-act="list">拉取</button>` +
-        `<button class="ghost small" data-act="edit">编辑</button>` +
-        `<button class="ghost small danger" data-act="del">删除</button>` +
-        `</div>` +
-        `<span class="ds-msg hidden"></span>`;
-      li.querySelector('[data-act="probe"]').addEventListener("click", () => probeDs(ds, li));
-      li.querySelector('[data-act="list"]').addEventListener("click", () => listDs(ds));
-      li.querySelector('[data-act="edit"]').addEventListener("click", () => openDsForm(ds));
-      li.querySelector('[data-act="del"]').addEventListener("click", () => deleteDs(ds, li));
-      ul.appendChild(li);
-    }
-  } catch (err) {
-    ul.innerHTML = `<li class="empty">加载失败：${esc(err.message)}</li>`;
-  }
+  const TYPE_LABEL = { file: "文件流", records: "记录 JSON" };
+  const TYPE_CLASS = { file: "file", records: "records" };
+  return api("/api/datasources")
+    .then(({ datasources }) => {
+      if (!datasources.length) {
+        ul.innerHTML = `<li class="empty">尚未配置数据源</li>`;
+        return;
+      }
+      ul.innerHTML = "";
+      for (const ds of datasources) {
+        const li = document.createElement("li");
+        const typeClass = TYPE_CLASS[ds.type] || "unknown";
+        const typeLabel = TYPE_LABEL[ds.type] || esc(ds.type);
+        li.innerHTML =
+          `<div class="ds-info">` +
+          `<span class="ds-name">${esc(ds.name)}</span>` +
+          `<span class="badge ${typeClass}">${typeLabel}</span>` +
+          `<span class="badge unknown">${esc(ds.auth)}</span>` +
+          `<div class="ds-url">${esc(ds.url)}</div>` +
+          `</div>` +
+          `<div class="ds-actions">` +
+          `<button class="ghost small" data-act="probe">测试</button>` +
+          `<button class="ghost small" data-act="list">拉取</button>` +
+          `<button class="ghost small" data-act="edit">编辑</button>` +
+          `<button class="ghost small danger" data-act="del">删除</button>` +
+          `</div>` +
+          `<span class="ds-msg hidden"></span>`;
+        li.querySelector('[data-act="probe"]').addEventListener("click", () => probeDs(ds, li));
+        li.querySelector('[data-act="list"]').addEventListener("click", () => listDs(ds));
+        li.querySelector('[data-act="edit"]').addEventListener("click", () => openDsForm(ds));
+        li.querySelector('[data-act="del"]').addEventListener("click", () => deleteDs(ds, li));
+        ul.appendChild(li);
+      }
+    })
+    .catch((err) => {
+      ul.innerHTML = `<li class="empty">加载失败：${esc(err.message)}</li>`;
+    });
 }
 
 async function probeDs(ds, li) {
@@ -666,7 +735,6 @@ async function refreshDocList() {
         await api(`/api/documents/${doc.id}`, { method: "DELETE" });
         refreshDocList();
       });
-      void info;
       ul.appendChild(li);
     }
   } catch (err) {

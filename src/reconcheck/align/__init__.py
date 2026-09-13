@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..errors import EmptyDocumentError
 from ..models import Row, Table
 from .keys import normalize_key
 
@@ -33,8 +34,20 @@ def align(
     Defaults to the first header common to both tables, raw normalisation.
 
     Exact key equality for now; fuzzy and three-way matching are later phases.
+
+    Raises :class:`EmptyDocumentError` when no usable key column exists on
+    both sides — an empty alignment would otherwise produce a misleading
+    "everything matches" report.
     """
     keys = match_on or _default_key_columns(left, right)
+    left_headers = set(left.headers)
+    right_headers = set(right.headers)
+    for col in keys:
+        if col not in left_headers or col not in right_headers:
+            raise EmptyDocumentError(
+                f"match key column {col!r} is missing on one side — pass --match-on "
+                "with a header both documents share"
+            )
     normalize = normalize or {}
     left_index = _index(left, keys, normalize)
     right_index = _index(right, keys, normalize)
@@ -48,7 +61,10 @@ def _default_key_columns(left: Table, right: Table) -> list[str]:
     for header in left.headers:
         if header and header in right.headers:
             return [header]
-    return [left.headers[0]] if left.headers else []
+    raise EmptyDocumentError(
+        "no shared header between the documents — pass --match-on with a column "
+        "both sides contain"
+    )
 
 
 def _index(table: Table, keys: list[str], normalize: dict[str, str]) -> dict[str, Row]:

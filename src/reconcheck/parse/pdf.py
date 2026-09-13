@@ -133,33 +133,47 @@ def _document_from_parts(
                 data = data[1:]  # repeated header row
             for row_idx, values in enumerate(data, start=1):
                 rows.append(_row(values, path, page_no, row_idx, headers))
-        return Document(path=str(path), tables=[Table(headers=headers, rows=rows, loc=SourceLoc(path=str(path), page=page_no))])
+        out_tables = [
+            Table(headers=headers, rows=rows, loc=SourceLoc(path=str(path), page=page_no))
+        ]
+        if text_lines:
+            # mixed file: some pages have ruling-line tables, others are
+            # borderless — keep both, never drop the borderless rows silently
+            out_tables.append(_table_from_lines(path, text_lines))
+        return Document(path=str(path), tables=out_tables)
 
-    # fallback: first line is the header, the rest are data rows
-    headers = _unique(text_lines[0][1])
+    if not text_lines:
+        return Document(path=str(path))
+    return Document(path=str(path), tables=[_table_from_lines(path, text_lines)])
+
+
+def _table_from_lines(path: Path, text_lines: list[tuple[int, list[str]]]) -> Table:
+    """Build a Table from clustered text lines (first line = header)."""
+    header_line = text_lines[0][1]
+    headers = _unique(header_line)
     rows: list[Row] = []
     for page_no, values in text_lines[1:]:
-        if values and values[0] == text_lines[0][1]:
+        if values == header_line:
             continue  # repeated header line
         row_idx = len(rows) + 1
         rows.append(_row(values, path, page_no, row_idx, headers))
-    if not rows:
-        return Document(path=str(path))
     page_no = text_lines[0][0]
-    return Document(path=str(path), tables=[Table(headers=headers, rows=rows, loc=SourceLoc(path=str(path), page=page_no))])
+    return Table(headers=headers, rows=rows, loc=SourceLoc(path=str(path), page=page_no))
 
 
 def _unique(headers: list[str]) -> list[str]:
-    seen: dict[str, int] = {}
+    seen: set[str] = set()
     out: list[str] = []
-    for header in headers:
+    for raw in headers:
+        header = raw.strip()
         if not header:
             header = f"col{len(out) + 1}"
-        if header in seen:
-            seen[header] += 1
-            header = f"{header}_{seen[header]}"
-        else:
-            seen[header] = 0
+        base = header
+        n = 1
+        while header in seen:
+            header = f"{base}_{n}"
+            n += 1
+        seen.add(header)
         out.append(header)
     return out
 

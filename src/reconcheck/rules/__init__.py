@@ -48,21 +48,40 @@ class Rule:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Rule:
-        sev = Severity(str(data.get("severity", "medium")).lower())
+        value = str(data.get("severity", "medium")).lower()
+        if value not in ("high", "medium", "low"):
+            raise ValueError(
+                f"invalid severity {value!r} in rule {data.get('id', '?')!r} "
+                "(expected high | medium | low)"
+            )
+        sev = Severity(value)
         tolerance = data.get("tolerance") or {}
         evidence = data.get("evidence") or {}
+        match_on = data.get("match_on") or []
+        if not isinstance(match_on, list):
+            match_on = [match_on]  # YAML `match_on: 料号` must not split into 单/字
         return cls(
             id=str(data["id"]),
             severity=sev,
-            match_on=[str(x) for x in (data.get("match_on") or [])],
+            match_on=[str(x) for x in match_on],
             compare=data.get("compare"),
             tolerance={
-                "relative": Decimal(str(tolerance.get("relative", "0.001"))),
-                "absolute": Decimal(str(tolerance.get("absolute", "0.01"))),
+                "relative": _tol(tolerance.get("relative"), "0.001"),
+                "absolute": _tol(tolerance.get("absolute"), "0.01"),
             },
             exceptions=list(data.get("exceptions") or []),
             require_both_sides=evidence.get("require") == "both_sides",
         )
+
+
+def _tol(raw: Any, default: str) -> Decimal:
+    """Coerce a tolerance value, tolerating explicit nulls and junk (-> default)."""
+    if raw is None:
+        return Decimal(default)
+    try:
+        return Decimal(str(raw))
+    except Exception:  # noqa: BLE001 - malformed tolerance falls back to default
+        return Decimal(default)
 
 
 def load_rules(source: str | Path | None = None) -> list[Rule]:
@@ -75,18 +94,31 @@ def load_rules(source: str | Path | None = None) -> list[Rule]:
         return [Rule.from_dict(DEFAULT_RULE)]
     p = Path(source)
     if p.is_dir():
-        files = sorted(p.glob("*.yaml")) + sorted(p.glob("*.yml"))
+        # glob() is case-insensitive on Windows: "RULES.YAML" matches both
+        # patterns, so resolve once and dedupe before parsing.
+        files = sorted({f.resolve() for f in p.glob("*.yaml")} | {f.resolve() for f in p.glob("*.yml")})
     elif p.is_file():
         files = [p]
     else:
         raise FileNotFoundError(f"rules source not found: {source}")
     rules: list[Rule] = []
     for f in files:
-        data = yaml.safe_load(f.read_text(encoding="utf-8"))
-        for item in data if isinstance(data, list) else [data]:
+        try:
+            parsed = yaml.safe_load(f.read_text(encoding="utf-8"))
+        except yaml.YAMLError as err:
+            raise ValueError(f"invalid rule YAML in '{f}': {err}") from err
+        items = parsed if isinstance(parsed, list) else [parsed]
+        for item in items:
             if item is None:
                 continue
-            rules.append(Rule.from_dict(item))
+            if not isinstance(item, dict) or not item.get("id"):
+                raise ValueError(
+                    f"'{f}' must contain a rule mapping (or a list of them) with an 'id'"
+                )
+            try:
+                rules.append(Rule.from_dict(item))
+            except (KeyError, TypeError, ValueError) as err:
+                raise ValueError(f"invalid rule in '{f}': {err}") from err
     return rules
 
 
@@ -222,30 +254,50 @@ def _exception_verdict(exceptions: list[dict[str, Any]], left: Cell, right: Cell
     ``"text_differs"`` when a date/text exception applies but the values
     genuinely differ (so a non-numeric column can still produce a finding),
     or ``""`` when no exception cares.
+
+    Every exception is evaluated before the verdict is decided: one
+    exception yielding ``exempt`` wins over another yielding
+    ``text_differs``, so e.g. a rounding exemption is not skipped just
+    because a case-insensitive text check ran first.
     """
+    any_text_differs = False
     for exc in exceptions:
         when = exc.get("when") if isinstance(exc, dict) else None
-        when = when or {}
+        if not when:
+            continue
         if when.get("text_equal_ignore_case"):
             lt = (left.text or "").strip()
             rt = (right.text or "").strip()
             if not lt or not rt:
                 continue
-            return "exempt" if lt.lower() == rt.lower() else "text_differs"
+            if lt.lower() == rt.lower():
+                return "exempt"
+            any_text_differs = True
+            continue
         if "dates_within" in when:
             ld = _parse_date(left.text)
             rd = _parse_date(right.text)
             if ld is None or rd is None:
                 continue
-            days = max(0, int(when["dates_within"].get("days", 3)))
-            return "exempt" if abs((ld - rd).days) <= days else "text_differs"
+            try:
+                days = max(0, int(when["dates_within"].get("days", 3)))
+            except (TypeError, ValueError):
+                days = 3
+            if abs((ld - rd).days) <= days:
+                return "exempt"
+            any_text_differs = True
+            continue
         if "rounding" in when:
             if left.value is None or right.value is None:
                 continue
-            decimals = int(when["rounding"].get("decimals", 2))
-            quantum = Decimal(f"1e-{decimals}")
+            try:
+                decimals = int(when["rounding"].get("decimals", 2))
+            except (TypeError, ValueError):
+                decimals = 2
+            quantum = Decimal(f"1e-{max(0, decimals)}")
             if left.value.quantize(quantum) == right.value.quantize(quantum):
                 return "exempt"
+            continue
         if "unit_conversion_between" in when:
             allowed = when["unit_conversion_between"]
             if left.value is None or right.value is None or len(allowed) != 2:
@@ -258,7 +310,7 @@ def _exception_verdict(exceptions: list[dict[str, Any]], left: Cell, right: Cell
                     {"relative": Decimal("0.001"), "absolute": Decimal("0.0001")},
                 ):
                     return "exempt"
-    return ""
+    return "text_differs" if any_text_differs else ""
 
 
 def _parse_date(text: str | None):

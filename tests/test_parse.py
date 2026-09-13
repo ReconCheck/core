@@ -105,3 +105,52 @@ def test_csv_control_char_bytes_rejected(tmp_path: Path):
     p.write_bytes(b"\x00\xd8\x00\x00" * 256)
     with pytest.raises(TextDecodeError):
         load_document(p)
+
+
+def test_scientific_notation_parses(tmp_path: Path):
+    p = tmp_path / "sci.csv"
+    p.write_text("id,v\n1,1.5E3\n2,1e-2 kg\n", encoding="utf-8")
+    table = load_document(p).tables[0]
+    assert table.rows[0].by_header("v").value == Decimal("1500")
+    small = table.rows[1].by_header("v")
+    assert small.value == Decimal("0.01")
+    assert small.unit == "kg"
+
+
+def test_huge_number_to_dict_does_not_overflow(tmp_path: Path):
+    p = tmp_path / "huge.csv"
+    p.write_text(f"id,v\n1,{'9' * 400}\n", encoding="utf-8")
+    cell = load_document(p).tables[0].rows[0].by_header("v")
+    assert cell.value is not None  # Decimal holds arbitrary magnitude...
+    assert cell.to_dict()["value"] is None  # ...but JSON float() must not crash
+
+
+def test_dedupe_headers_never_shadows_real_suffix(tmp_path: Path):
+    from reconcheck.parse.tabular import _dedupe_headers
+
+    # a real "A_1" never shares a name with a generated one: all unique
+    out = _dedupe_headers(["A", "A", "A_1"])
+    assert out[0] == "A" and out[1] == "A_1"
+    assert len(set(out)) == len(out) == 3
+    # clean runs keep the friendly A / A_1 / A_2 numbering
+    assert _dedupe_headers(["A", "A", "A"]) == ["A", "A_1", "A_2"]
+    assert _dedupe_headers(["", "x", "x"]) == ["col1", "x", "x_1"]
+
+
+def test_document_from_records_null_cells_become_empty():
+    from reconcheck.parse.tabular import document_from_records
+
+    doc = document_from_records(
+        [{"id": "1", "note": None, "amt": "10"}],
+        "records.json",
+    )
+    table = doc.tables[0]
+    assert table.rows[0].by_header("note").text == ""
+    assert table.rows[0].by_header("amt").text == "10"
+
+
+def test_xlsx_corrupt_raises_engine_error_not_bare_zip(tmp_path: Path):
+    p = tmp_path / "broken.xlsx"
+    p.write_bytes(b"PK\x03\x04 not a real zip")
+    with pytest.raises(UnsupportedFormatError):
+        load_document(p)

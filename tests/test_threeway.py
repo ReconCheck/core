@@ -147,3 +147,42 @@ def test_api_compare3_wrong_count(tmp_path: Path):
             r = client.post("/api/compare3", files=[("files", (paths[0].name, f, "text/csv"))])
         assert r.status_code == 400
         assert "three documents" in r.text
+
+
+def test_threeway_respects_exception_aggregation(tmp_path: Path):
+    """Three-way conflicts must judge with the same exception semantics as the
+    pairwise pipeline (a rounding exemption wins even when text differs)."""
+    from reconcheck.rules import Rule
+
+    header = "k,v\n"
+    for name, v in (("A.csv", "100.015"), ("B.csv", "100.016"), ("C.csv", "100.015")):
+        (tmp_path / name).write_text(header + f"1,{v}\n", encoding="utf-8")
+    docs = [
+        load_document(p)
+        for p in (tmp_path / "A.csv", tmp_path / "B.csv", tmp_path / "C.csv")
+    ]
+    strict = [Rule(id="strict", compare="v", tolerance={"absolute": 0, "relative": 0})]
+    assert len(compare_three(docs, match_on=["k"], rules=strict)["three_way"]) == 1
+    rounded = [
+        Rule(
+            id="rounded",
+            compare="v",
+            tolerance={"absolute": 0, "relative": 0},
+            exceptions=[{"when": {"rounding": {"decimals": 2}}}],
+        )
+    ]
+    assert compare_three(docs, match_on=["k"], rules=rounded)["three_way"] == []
+
+
+def test_threeway_unit_anchor_not_stuck_to_first_doc(tmp_path: Path):
+    """The unit anchor is the first *set* unit: 5 vs 5000 g must not be judged
+    as a conflict merely because doc[0] carries no unit."""
+    header = "k,v\n"
+    for name, v in (("A.csv", "5"), ("B.csv", "5 kg"), ("C.csv", "5000 g")):
+        (tmp_path / name).write_text(header + f"1,{v}\n", encoding="utf-8")
+    docs = [
+        load_document(p)
+        for p in (tmp_path / "A.csv", tmp_path / "B.csv", tmp_path / "C.csv")
+    ]
+    report = compare_three(docs, match_on=["k"])
+    assert report["three_way"] == []

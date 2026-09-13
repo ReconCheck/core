@@ -15,6 +15,7 @@ those live in the ``parse`` and ``rules`` packages.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -22,7 +23,10 @@ from enum import Enum
 from typing import Any
 
 _CURRENCY = "¥$€£"
-_NUM_RE = re.compile(r"^\s*([+-]?(?:\d[\d,]*)(?:\.\d+)?)\s*([A-Za-z\u4e00-\u9fff%]+)?\s*$")
+_NUM_RE = re.compile(
+    r"^\s*([+-]?(?:(?:\d[\d,]*)(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*"
+    r"([A-Za-z\u4e00-\u9fff%]+)?\s*$"
+)
 
 
 class Severity(str, Enum):
@@ -92,10 +96,18 @@ class Cell:
         self.unit = (m.group(2) or "").lower() or None
 
     def to_dict(self) -> dict[str, Any]:
+        value: float | None = None
+        if self.value is not None:
+            try:
+                value = float(self.value)
+            except (OverflowError, ValueError):
+                value = None
+            if value is not None and not math.isfinite(value):
+                value = None  # inf/NaN are not valid JSON numbers
         return {
             "text": self.text,
             "header": self.loc.header,
-            "value": None if self.value is None else float(self.value),
+            "value": value,
             "unit": self.unit,
             "loc": self.loc.to_dict(),
         }

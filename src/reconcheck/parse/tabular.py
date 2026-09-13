@@ -66,20 +66,6 @@ def load_document(path: str | Path, sheet: str | None = None) -> Document:
     )
 
 
-def _decode(raw: bytes) -> str:
-    """Decode bytes, trying encodings Chinese Excel exports actually use."""
-    if not raw:
-        return ""
-    for encoding in ("utf-8-sig", "gb18030", "utf-16", "latin-1"):
-        try:
-            text = raw.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-        if _looks_like_text(text):
-            return text
-    raise TextDecodeError("file bytes do not form readable text — is this really a CSV/TSV/TXT?")
-
-
 def _sniff_delimiter(text: str) -> str:
     try:
         return csv.Sniffer().sniff(text[:2048], delimiters=",;\t|").delimiter
@@ -88,17 +74,23 @@ def _sniff_delimiter(text: str) -> str:
 
 
 def _dedupe_headers(headers: list[str]) -> list[str]:
-    """Ensure header names are unique; blank ones get a generated name."""
-    seen: dict[str, int] = {}
+    """Ensure header names are unique; blank ones get a generated name.
+
+    Suffixes join the same pool, so a generated ``A_1`` can never collide
+    with a real ``A_1`` header and silently shadow a column.
+    """
+    seen: set[str] = set()
     out: list[str] = []
-    for header in headers:
+    for raw in headers:
+        header = raw.strip()
         if not header:
             header = f"col{len(out) + 1}"
-        if header in seen:
-            seen[header] += 1
-            header = f"{header}_{seen[header]}"
-        else:
-            seen[header] = 0
+        base = header
+        n = 1
+        while header in seen:
+            header = f"{base}_{n}"
+            n += 1
+        seen.add(header)
         out.append(header)
     return out
 
@@ -142,9 +134,12 @@ def _document_from_xlsx(p: Path, sheet: str | None = None) -> Document:
     # read-only streaming keeps memory flat for large sheets; a handful of
     # producers write files the read-only reader refuses, so fall back once
     try:
-        wb = load_workbook(p, read_only=True, data_only=True)
-    except Exception:  # noqa: BLE001 - defensive fallback to the normal reader
-        wb = load_workbook(p, read_only=False, data_only=True)
+        try:
+            wb = load_workbook(p, read_only=True, data_only=True)
+        except Exception:  # noqa: BLE001 - defensive fallback to the normal reader
+            wb = load_workbook(p, read_only=False, data_only=True)
+    except Exception as err:  # noqa: BLE001 - openpyxl/ZipFile exceptions leak
+        raise UnsupportedFormatError(f"'{p.name}' is not a readable Excel file: {err}") from err
     tables: list[Table] = []
     try:
         for ws in wb.worksheets:
@@ -202,7 +197,12 @@ def document_from_records(records: list[dict[str, Any]], path: str | Path) -> Do
     deduped = _dedupe_headers(headers)
     p = Path(str(path))
     rows = [
-        _row_from_values([str(r.get(h, "")) for h in headers], p, i, deduped)
+        _row_from_values(
+            ["" if r.get(h, "") is None else str(r[h]) for h in headers],
+            p,
+            i,
+            deduped,
+        )
         for i, r in enumerate(records, start=2)
     ]
     table = Table(headers=deduped, rows=rows, loc=SourceLoc(path=str(p), row=2, col=1))

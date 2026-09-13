@@ -2,6 +2,7 @@
 
 import csv
 import json
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -11,6 +12,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from reconcheck.web.app import create_app
+
+# the integration test server runs on loopback; the SSRF guard must not block
+# it (production keeps the guard on unless this env is set deliberately)
+os.environ["RECONCHECK_ALLOW_PRIVATE_FETCH"] = "1"
 
 ROOT = Path(__file__).resolve().parent.parent
 PO = ROOT / "examples" / "po.csv"
@@ -78,6 +83,7 @@ def httpd() -> str:
         "/file/po.csv": lambda: (200, "text/csv", PO_BYTES),
         "/file/invoice.csv": lambda: (200, "text/csv", INV_BYTES),
         "/big.bin": lambda: (200, "application/octet-stream", b"x" * 2000),
+        "/bad.json": lambda: (200, "application/json", b"this is not json"),
         "/big.json": lambda: (
             200,
             "application/json",
@@ -161,6 +167,85 @@ def test_datasource_probe_ok_and_fail(tmp_path: Path, httpd: str):
         ).json()
         r = client.post(f"/api/datasources/{bad_ds['id']}/probe").json()
         assert r["ok"] is False and r["error"]
+
+
+# --------------------------------------------------------------------------- security
+
+
+def test_guard_url_rejects_non_public_targets(monkeypatch):
+    import reconcheck.web.datasources as ds
+
+    monkeypatch.delenv("RECONCHECK_ALLOW_PRIVATE_FETCH", raising=False)
+    # resolve attacker-controlled hostnames to a loopback address
+    monkeypatch.setattr(
+        ds.socket,
+        "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("127.0.0.1", 0))],
+    )
+    assert ds.guard_url("http://attacker.example/x")
+    assert ds.guard_url("http://169.254.169.254/latest/meta-data")  # cloud metadata
+    assert ds.guard_url("http://127.0.0.1:8080/x")
+    assert ds.guard_url("http://10.1.2.3/x")
+    assert ds.guard_url("http://192.168.0.1/x")
+    assert ds.guard_url("http://172.16.5.5/x")
+    assert ds.guard_url("http://localhost/x")
+    assert ds.guard_url("file:///etc/passwd")
+    assert ds.guard_url("ftp://example.com/x")
+    assert ds.guard_url("gopher://localhost/x")
+
+
+def test_guard_url_public_and_env_bypass(monkeypatch):
+    import reconcheck.web.datasources as ds
+
+    monkeypatch.delenv("RECONCHECK_ALLOW_PRIVATE_FETCH", raising=False)
+    monkeypatch.setattr(
+        ds.socket,
+        "getaddrinfo",
+        lambda host, port: [(2, 1, 6, "", ("8.8.8.8", 0))],
+    )
+    assert ds.guard_url("https://example.com/csv") is None
+    # operator opt-out for intranet deployments
+    monkeypatch.setenv("RECONCHECK_ALLOW_PRIVATE_FETCH", "1")
+    assert ds.guard_url("http://127.0.0.1:9/x") is None
+
+
+def test_datasource_from_dict_rejects_non_safe_ids():
+    from reconcheck.web.datasources import DataSource
+
+    try:
+        DataSource.from_dict({"id": "..\\..\\x", "name": "n", "url": "http://a.b"})
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+    try:
+        DataSource.from_dict({"id": "UPPER!"})
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+    auto = DataSource.from_dict({"name": "n", "url": "http://a.b"})
+    assert auto.id and len(auto.id) >= 6  # generated id is itself safe
+
+
+def test_record_id_is_url_encoded():
+    from reconcheck.web.datasources import DataSource
+
+    ds = DataSource.from_dict({"name": "n", "url": "http://h/{id}/x"})
+    assert ds.url_for("a b?c") == "http://h/a%20b%3Fc/x"
+
+
+def test_fetch_records_invalid_json_is_422(tmp_path: Path, httpd: str):
+    with _client(tmp_path) as client:
+        ds = client.post(
+            "/api/datasources",
+            json={
+                "name": "badjson",
+                "type": "records",
+                "url": f"{httpd}/bad.json",
+                "records_path": "data",
+            },
+        ).json()
+        r = client.post(f"/api/datasources/{ds['id']}/fetch", json={})
+        assert r.status_code == 422
 
 
 def test_datasource_list_items(tmp_path: Path, httpd: str):

@@ -1,6 +1,7 @@
 from conftest import make_table
 from reconcheck.align import align
 from reconcheck.align.units import convert  # noqa: F401  (sanity import check)
+from reconcheck.errors import EmptyDocumentError
 from reconcheck.models import Cell
 
 
@@ -50,3 +51,24 @@ def test_align_defaults_to_first_common_header():
     pairs = align(left, right)
     assert len(pairs) == 1
     assert pairs[0].left.by_header("v").value == 10
+
+
+def test_align_no_shared_header_raises():
+    """Empty alignment would print a misleading 'all clean' report — refuse."""
+    left = make_table(["id"], [{"id": "1"}])
+    right = make_table(["key"], [{"key": "1"}])
+    try:
+        align(left, right)
+        raise AssertionError("expected EmptyDocumentError")
+    except EmptyDocumentError:
+        pass
+
+
+def test_align_missing_match_on_column_raises():
+    left = make_table(["id", "v"], [{"id": "1", "v": "1"}])
+    right = make_table(["id", "v"], [{"id": "1", "v": "2"}])
+    try:
+        align(left, right, match_on=["nope"])
+        raise AssertionError("expected EmptyDocumentError")
+    except EmptyDocumentError:
+        pass

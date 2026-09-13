@@ -1,0 +1,14 @@
+# Quantities are the same material, so kg / g are the same quantity.
+id: po-invoice-qty-unit-agnostic
+applies_to: [purchase_order, invoice]
+severity: high
+match_on: [料号]
+compare: 数量
+tolerance:
+  relative: 0
+  absolute: 0
+exceptions:
+  - when:
+      unit_conversion_between: [kg, g]
+evidence:
+  require: both_sides

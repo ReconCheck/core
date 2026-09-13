@@ -1,10 +1,11 @@
+import random
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
 
-from reconcheck.errors import UnsupportedFormatError
+from reconcheck.errors import TextDecodeError, UnsupportedFormatError
 from reconcheck.parse import load_document
 
 
@@ -86,4 +87,21 @@ def test_unsupported_format(tmp_path: Path):
     p = tmp_path / "a.pdf"
     p.write_bytes(b"%PDF-1.4")
     with pytest.raises(UnsupportedFormatError):
+        load_document(p)
+
+
+def test_csv_binary_junk_raises_text_decode_error(tmp_path: Path):
+    """Random bytes must fail the decode plausibility gate, not parse as junk."""
+    p = tmp_path / "junk.csv"
+    p.write_bytes(random.Random(42).randbytes(4096))
+    with pytest.raises(TextDecodeError):
+        load_document(p)
+
+
+def test_csv_control_char_bytes_rejected(tmp_path: Path):
+    # surrogates break utf-16/utf-8/gb18030; latin-1 fallback then fails the
+    # control-char plausibility gate
+    p = tmp_path / "ctl.csv"
+    p.write_bytes(b"\x00\xd8\x00\x00" * 256)
+    with pytest.raises(TextDecodeError):
         load_document(p)

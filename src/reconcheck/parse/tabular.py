@@ -15,10 +15,36 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from ..errors import UnsupportedFormatError
+from ..errors import TextDecodeError, UnsupportedFormatError
 from ..models import Cell, Document, Row, SourceLoc, Table
 
 _DELIMITERS = {".csv": ",", ".tsv": "\t", ".txt": None}
+# reject a decodable-but-garbage candidate when this share of its characters
+# are control characters (random binary bytes hit ~12% in any single-byte path)
+_MAX_NONPRINTABLE_RATIO = 0.10
+
+
+def _looks_like_text(text: str, sample: int = 8192) -> bool:
+    """Heuristic so binary junk never parses as a 'successful' table."""
+    window = text[:sample]
+    if not window:
+        return False
+    nonprintable = sum(1 for ch in window if not (ch.isprintable() or ch in "\t\n\r"))
+    return nonprintable / len(window) < _MAX_NONPRINTABLE_RATIO
+
+
+def _decode(raw: bytes) -> str:
+    """Decode bytes, trying encodings Chinese Excel exports actually use."""
+    if not raw:
+        return ""
+    for encoding in ("utf-8-sig", "gb18030", "utf-16", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        if _looks_like_text(text):
+            return text
+    raise TextDecodeError("file bytes do not form readable text — is this really a CSV/TSV/TXT?")
 
 
 def load_document(path: str | Path, sheet: str | None = None) -> Document:
@@ -39,12 +65,16 @@ def load_document(path: str | Path, sheet: str | None = None) -> Document:
 
 def _decode(raw: bytes) -> str:
     """Decode bytes, trying encodings Chinese Excel exports actually use."""
+    if not raw:
+        return ""
     for encoding in ("utf-8-sig", "gb18030", "utf-16", "latin-1"):
         try:
-            return raw.decode(encoding)
+            text = raw.decode(encoding)
         except UnicodeDecodeError:
             continue
-    return raw.decode("latin-1", errors="replace")
+        if _looks_like_text(text):
+            return text
+    raise TextDecodeError("file bytes do not form readable text — is this really a CSV/TSV/TXT?")
 
 
 def _sniff_delimiter(text: str) -> str:
@@ -106,7 +136,12 @@ def _document_from_delimited(p: Path) -> Document:
 
 
 def _document_from_xlsx(p: Path, sheet: str | None = None) -> Document:
-    wb = load_workbook(p, read_only=False, data_only=True)
+    # read-only streaming keeps memory flat for large sheets; a handful of
+    # producers write files the read-only reader refuses, so fall back once
+    try:
+        wb = load_workbook(p, read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001 - defensive fallback to the normal reader
+        wb = load_workbook(p, read_only=False, data_only=True)
     tables: list[Table] = []
     try:
         for ws in wb.worksheets:
@@ -125,9 +160,7 @@ def _document_from_xlsx(p: Path, sheet: str | None = None) -> Document:
             width = max((len(vals) for _, vals in grid), default=len(headers))
             while len(headers) < width:
                 headers.append(f"col{len(headers) + 1}")
-            entries = [
-                _row_xlsx(vals, p, ws.title, row_num, headers) for row_num, vals in grid[1:]
-            ]
+            entries = [_row_xlsx(vals, p, ws.title, row_num, headers) for row_num, vals in grid[1:]]
             loc = SourceLoc(path=str(p), sheet=ws.title, row=header_row + 1, col=1)
             tables.append(Table(headers=headers, rows=entries, loc=loc))
     finally:

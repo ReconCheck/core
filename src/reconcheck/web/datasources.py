@@ -24,7 +24,38 @@ from typing import Any
 import httpx
 
 DEFAULT_TIMEOUT = httpx.Timeout(20.0)
-MAX_BYTES = 50 * 1024 * 1024  # 50 MB per fetched file
+MAX_BYTES = 50 * 1024 * 1024  # 50 MB per fetched file (streaming cap)
+
+
+class _CappedResponse:
+    """Minimal httpx.Response stand-in whose body is capped while streaming."""
+
+    def __init__(
+        self,
+        request: httpx.Request,
+        status_code: int,
+        headers: httpx.Headers,
+        content: bytes,
+    ) -> None:
+        self.request = request
+        self.status_code = status_code
+        self.headers = headers
+        self.content = content
+
+    @property
+    def text(self) -> str:
+        return self.content.decode("utf-8", errors="replace")
+
+    def raise_for_status(self) -> None:
+        if not 200 <= self.status_code < 300:
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code} for {self.request.url}",
+                request=self.request,
+                response=self,
+            )
+
+    def json(self) -> Any:
+        return json.loads(self.content.decode("utf-8"))
 
 
 @dataclass
@@ -99,22 +130,29 @@ class DataSource:
             url = url.replace("{id}", record_id)
         return url
 
-    def _request(self, record_id: str | None = None, listing: bool = False) -> httpx.Response:
+    def _request(self, record_id: str | None = None, listing: bool = False) -> _CappedResponse:
+        """GET/POST the endpoint, streaming the body with a hard size cap."""
+        url = self.url_for(record_id, listing=listing)
         with httpx.Client(timeout=DEFAULT_TIMEOUT, follow_redirects=True) as client:
-            return client.request(
-                self.method,
-                self.url_for(record_id, listing=listing),
-                headers=self.headers_for(),
-            )
+            with client.stream(self.method, url, headers=self.headers_for()) as resp:
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in resp.iter_bytes():
+                    total += len(chunk)
+                    if total > MAX_BYTES:
+                        raise httpx.RequestError(
+                            f"response too large (> {MAX_BYTES} bytes): {url}",
+                            request=resp.request,
+                        )
+                    chunks.append(chunk)
+                return _CappedResponse(
+                    resp.request, resp.status_code, resp.headers, b"".join(chunks)
+                )
 
     def fetch_bytes(self, record_id: str | None = None) -> bytes:
         """File-type fetch: return the raw body."""
         r = self._request(record_id)
         r.raise_for_status()
-        if len(r.content) > MAX_BYTES:
-            raise httpx.RequestError(
-                f"response too large ({len(r.content)} bytes)", request=r.request
-            )
         return r.content
 
     def fetch_json(self, record_id: str | None = None, listing: bool = False) -> Any:

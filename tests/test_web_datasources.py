@@ -77,6 +77,12 @@ def httpd() -> str:
         ),
         "/file/po.csv": lambda: (200, "text/csv", PO_BYTES),
         "/file/invoice.csv": lambda: (200, "text/csv", INV_BYTES),
+        "/big.bin": lambda: (200, "application/octet-stream", b"x" * 2000),
+        "/big.json": lambda: (
+            200,
+            "application/json",
+            json.dumps({"data": [{"k": "v" * 200}]}).encode("utf-8"),
+        ),
     }
     handler = type("RoutesHandler", (_Handler,), {"routes": routes})
     server = HTTPServer(("127.0.0.1", 0), handler)
@@ -223,6 +229,35 @@ def test_fetch_records_missing_path_is_422(tmp_path: Path, httpd: str):
         r = client.post(f"/api/datasources/{ds['id']}/fetch", json={})
         assert r.status_code == 422
         assert "no records" in r.json()["detail"]
+
+
+def test_response_size_capped_while_streaming(tmp_path: Path, httpd: str, monkeypatch):
+    """A reply larger than MAX_BYTES is cut off mid-stream, not buffered."""
+    import reconcheck.web.datasources as ds_mod
+
+    monkeypatch.setattr(ds_mod, "MAX_BYTES", 100)
+    with _client(tmp_path) as client:
+        ds = client.post(
+            "/api/datasources",
+            json={"name": "big", "type": "file", "url": f"{httpd}/big.bin"},
+        ).json()
+
+        probe = client.post(f"/api/datasources/{ds['id']}/probe").json()
+        assert probe["ok"] is False and "too large" in probe["error"]
+
+        fetch = client.post(f"/api/datasources/{ds['id']}/fetch", json={})
+        assert fetch.status_code == 502
+
+        ds_rec = client.post(
+            "/api/datasources",
+            json={
+                "name": "big-rec",
+                "type": "records",
+                "url": f"{httpd}/big.json",
+                "records_path": "data",
+            },
+        ).json()
+        assert client.post(f"/api/datasources/{ds_rec['id']}/fetch", json={}).status_code == 502
 
 
 def test_fetch_file_document_and_compare(tmp_path: Path, httpd: str):

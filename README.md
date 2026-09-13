@@ -47,8 +47,10 @@ enterprise systems and the upload frontend:
 | `POST /api/datasources/{id}/fetch` | fetch a document (file stream) or records (JSON→table) into the library |
 
 Interactive docs at `http://127.0.0.1:8765/docs`. Set `RECONCHECK_API_KEY` to
-require an `X-API-Key` header on every `/api/*` call. Example for enterprise
-callers:
+require an `X-API-Key` header on every `/api/*` call. **Without it the API is
+unauthenticated** — the server prints a warning on startup, and anyone who can
+reach the port can read and write data; always set the key outside a trusted
+network. Example for enterprise callers:
 
 ```bash
 # compare two uploaded files
@@ -71,6 +73,21 @@ Data source types: `file` (the endpoint returns the document byte stream, URL
 may contain `{id}`) and `records` (JSON array + `records_path`, converted into
 a table). Auth: `none` / `bearer` / custom `header`. Secrets are stored in the
 local `RECONCHECK_DATA` directory and never echoed by the API.
+
+Operational knobs:
+
+| variable | default | effect |
+|---|---|---|
+| `RECONCHECK_DATA` | `./data` | data directory (jobs, reports, documents, data sources) |
+| `RECONCHECK_API_KEY` | *(unset)* | require `X-API-Key` on every `/api/*` call |
+| `RECONCHECK_TTL_DAYS` | `30` | retention for uploaded files and generated reports; a background janitor prunes older entries every hour (active jobs are never touched) |
+| — (fixed) | `64 MB` | per-upload size limit (413) |
+| — (fixed) | `50 MB` | per-fetch response cap, enforced while streaming from a data source |
+
+Text parsing decodes UTF-8 / GB18030 / UTF-16 / Latin-1 and refuses bytes that
+do not look like readable text (binary junk gets a clear error instead of a
+garbage table). XLSX is loaded in read-only streaming mode to keep memory flat
+on large workbooks.
 
 ## The problem
 

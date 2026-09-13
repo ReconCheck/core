@@ -26,6 +26,7 @@ import os
 import queue
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -56,6 +57,19 @@ DEFAULT_RULES_DIR = REPO_ROOT / "examples" / "rules"
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _PREVIEW_ROWS = 100
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024  # 64 MB per uploaded file
+
+JANITOR_INTERVAL = 3600  # seconds between TTL cleanup passes
+DEFAULT_TTL_DAYS = 30
+
+
+def _ttl_seconds() -> int:
+    """Retention window from RECONCHECK_TTL_DAYS (default 30 days)."""
+    raw = os.environ.get("RECONCHECK_TTL_DAYS", "")
+    try:
+        days = max(1, int(raw))
+    except ValueError:
+        days = DEFAULT_TTL_DAYS
+    return days * 24 * 3600
 
 
 class UploadTooLarge(Exception):
@@ -105,6 +119,42 @@ class JobStore:
         """Jobs that were queued but not finished (replayed after a restart)."""
         with self._lock:
             return [jid for jid, job in self._jobs.items() if job.get("status") == "queued"]
+
+    def active_job_ids(self) -> set[str]:
+        """Jobs still being worked on — their files must never be pruned."""
+        with self._lock:
+            return {
+                jid for jid, job in self._jobs.items() if job.get("status") in ("queued", "running")
+            }
+
+    def cleanup(
+        self,
+        now: float | None = None,
+        ttl: int | None = None,
+        active: set[str] | None = None,
+    ) -> int:
+        """Delete job file dirs and reports older than ``ttl``; returns count."""
+        now = now if now is not None else time.time()
+        ttl = ttl if ttl is not None else _ttl_seconds()
+        active = active if active is not None else self.active_job_ids()
+        removed = 0
+        for job_dir in self.files_dir.iterdir():
+            if not job_dir.is_dir() or job_dir.name in active:
+                continue
+            try:
+                if now - job_dir.stat().st_mtime > ttl:
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                    removed += 1
+            except OSError:
+                continue
+        for report in self.reports_dir.glob("*.json"):
+            try:
+                if now - report.stat().st_mtime > ttl:
+                    report.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                continue
+        return removed
 
     def create_job(self, job: dict[str, Any]) -> None:
         with self._lock:
@@ -246,8 +296,13 @@ class Worker:
     def start(self) -> None:
         if self._thread is not None:
             return
+        self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="reconcheck-worker")
         self._thread.start()
+        self._janitor = threading.Thread(
+            target=self._janitor_loop, daemon=True, name="reconcheck-janitor"
+        )
+        self._janitor.start()
         # replay jobs that were still queued when the process restarted
         for job_id in self.store.queued_jobs():
             self.submit(job_id)
@@ -255,9 +310,20 @@ class Worker:
     def stop(self) -> None:
         if self._thread is None:
             return
+        self._stop.set()
         self._queue.put(None)
         self._thread.join(timeout=5)
+        if self._janitor is not None:
+            self._janitor.join(timeout=5)
         self._thread = None
+
+    def _janitor_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.store.cleanup(time.time(), _ttl_seconds())
+            except Exception:  # noqa: BLE001 - a janitor pass must never die
+                pass
+            self._stop.wait(JANITOR_INTERVAL)
 
     def submit(self, job_id: str) -> None:
         self._queue.put(job_id)
@@ -380,6 +446,14 @@ def create_app(
     )
 
     key = api_key or os.environ.get("RECONCHECK_API_KEY")
+    if not key:
+        print(
+            "\n[reconcheck] WARNING: no RECONCHECK_API_KEY configured — the API is "
+            "unauthenticated. Anyone who can reach this port can read and write data. "
+            "Set RECONCHECK_API_KEY before deploying outside a trusted network.\n",
+            file=sys.stderr,
+            flush=True,
+        )
     api = APIRouter(prefix="/api", dependencies=[Depends(_auth_dependency(key))])
 
     @api.get("/health")

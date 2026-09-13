@@ -1,10 +1,12 @@
 """Web layer tests: REST API, async jobs, auth."""
 
+import os
 import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+import reconcheck.web.app as webapp
 from reconcheck.web.app import create_app
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -224,3 +226,33 @@ def test_jobs_identical_uploads_are_deduplicated(tmp_path: Path):
         )
         assert r.status_code == 422  # only one distinct entry survives
         assert "two distinct documents" in r.json()["detail"]
+
+
+def test_jobstore_cleanup_ttl(tmp_path: Path):
+    """Janitor pruning: old job dirs/reports die, active jobs survive."""
+    store = webapp.JobStore(tmp_path / "data")
+    old = time.time() - 100 * 24 * 3600
+
+    expired_dir = store.files_dir / "aaaaaaa11111"
+    expired_dir.mkdir(parents=True)
+    (expired_dir / "00_x.csv").write_bytes(b"x")
+    os.utime(expired_dir, (old, old))
+
+    expired_report = store.reports_dir / "bbbbbb222222.json"
+    expired_report.write_text("{}", encoding="utf-8")
+    os.utime(expired_report, (old, old))
+
+    active_dir = store.files_dir / "ccccccc33333"
+    active_dir.mkdir(parents=True)
+    (active_dir / "00_y.csv").write_bytes(b"y")
+    os.utime(active_dir, (old, old))
+
+    fresh_dir = store.files_dir / "ddddddd44444"
+    fresh_dir.mkdir(parents=True)
+    (fresh_dir / "00_z.csv").write_bytes(b"z")
+
+    removed = store.cleanup(time.time(), ttl=30 * 24 * 3600, active={"ccccccc33333"})
+    assert removed == 2
+    assert not expired_dir.exists() and not expired_report.exists()
+    assert active_dir.exists()
+    assert fresh_dir.exists()

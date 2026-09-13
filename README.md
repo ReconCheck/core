@@ -4,9 +4,23 @@
 
 把一叠格式混乱的单据拖进去，告诉你哪几处对不上、差多少钱、原文在哪一行。
 
-> **Status: very early.** The engine is being built in the open. Nothing is usable yet — watch or star this repository to follow along.
+> **Status: early but runnable.** A minimal closed loop works today on tabular files (CSV / TSV / XLSX): point it at a purchase order and an invoice, it parses both, aligns the rows, runs the rules, and emits a JSON report whose every finding cites the exact row and column in the original file. PDF / OCR parsing and real entity resolution are next — watch or star this repository to follow along.
 
 ---
+
+## Quick start
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install -e ".[dev]"      # Windows
+.venv/bin/python -m pip install -e ".[dev]"          # macOS / Linux
+
+.venv/Scripts/reconcheck compare examples/po.csv examples/invoice.csv \
+  --rules examples/rules --match-on 料号 --normalize 料号:part_no
+```
+
+Every finding in the report carries `evidence` with a `cell://` href pointing
+back to the exact cell in the original file — that is the whole point.
 
 ## The problem
 
@@ -39,12 +53,13 @@ The output is not a risk score. It is a list of specific, checkable claims about
 
 ## Roadmap
 
+- [x] Tabular parsing, row alignment, YAML differential rules (tolerance + exceptions), evidence-chain JSON, CLI
 - [ ] Document parsing — scans, borderless tables, multi-column PDFs
 - [ ] Cross-document alignment — entity resolution, unit normalisation
-- [ ] Differential rule engine
-- [ ] Evidence-chain output format
+- [ ] Differential rule engine — richer exception catalogue
+- [ ] Evidence-chain output format — stable v1
 - [ ] Three-way match: purchase order / delivery note / invoice
-- [ ] CLI and REST API
+- [ ] REST API
 
 Order is not a promise. It is the order in which the pieces are useful.
 
@@ -68,7 +83,7 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 它解决的是 ERP 不解决的问题：ERP 负责记账，不负责检查账记的这几份文件之间是否自洽。
 
-> 项目处于早期开发阶段，尚不可用。欢迎 Watch / Star 关注进展。
+> 项目处于早期开发阶段，表格类文件（CSV/TSV/XLSX）的最小闭环已可用，PDF/OCR 解析与实体对齐是下一步。欢迎 Watch / Star 关注进展。
 
 ### 为什么先做开源
 

@@ -116,6 +116,28 @@ referenceable in `/api/compare` and `/api/jobs` via `doc_ids`. Fetching is a
 server-side request (no browser CORS, no SSRF guard in v0 — the operator
 configures the endpoint deliberately).
 
+## Robustness & security (implemented)
+
+- **Input limits** — uploads capped at 64 MB (413); data-source responses capped
+  at 50 MB *while streaming* (mid-download abort, not check-after-buffer).
+- **Path traversal** — document and report ids are validated against a 12-hex
+  allowlist before touching the filesystem (delete / download / report reads);
+  `Content-Disposition` filenames are sanitized.
+- **Duplicate documents** — a job drops entries with the same `doc_id` or
+  byte-identical uploads (sha256), so the `.csv-2` rename trick can never
+  produce a self-comparison.
+- **Failure isolation** — one bad pair is marked `failed` with its error while
+  the rest of the batch finishes; `job.error` surfaces in the job view.
+- **Decode plausibility gate** — text candidates (utf-8-sig / gb18030 / utf-16 /
+  latin-1) are accepted only when the control-char ratio is below 10%, so
+  random binary raises `TextDecodeError` instead of parsing as garbage.
+- **Persistence & janitor** — jobs.json is written atomically; queued jobs are
+  replayed after a restart; a background janitor (hourly + at startup) prunes
+  uploaded files and reports older than `RECONCHECK_TTL_DAYS` (default 30,
+  active jobs never touched).
+- **Auth** — optional `RECONCHECK_API_KEY` → `X-API-Key` on every `/api/*`
+  call; a loud startup warning when unset.
+
 ## LLM participation (design, not yet implemented)
 
 The engine stays deterministic: rules are the primary judge. An opt-in

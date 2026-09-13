@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 
+def safe_id(doc_id: str) -> bool:
+    """Document/report ids are server-generated lowercase hex (12 chars)."""
+    return len(doc_id) == 12 and all(c in "0123456789abcdef" for c in doc_id)
+
+
 class DocumentStore:
     """Disk-backed library of "documents" (files or fetched records).
 
@@ -44,9 +49,7 @@ class DocumentStore:
             "size": len(data),
             "created_at": time.time(),
         }
-        (folder / "meta.json").write_text(
-            json.dumps(meta, ensure_ascii=False), encoding="utf-8"
-        )
+        (folder / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
         return doc_id
 
     def list(self) -> list[dict[str, Any]]:
@@ -78,6 +81,9 @@ class DocumentStore:
         return path
 
     def delete(self, doc_id: str) -> bool:
+        """Delete a document; idempotent, refuses non-safe ids (path guard)."""
+        if not safe_id(doc_id):
+            return False
         folder = self.docs_dir / doc_id
         if not folder.is_dir():
             return False

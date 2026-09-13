@@ -33,6 +33,7 @@ function esc(s) {
 }
 
 function fmtSize(n) {
+  n = Number(n) || 0;
   if (n < 1024) return n + " B";
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
   return (n / (1024 * 1024)).toFixed(1) + " MB";
@@ -40,9 +41,32 @@ function fmtSize(n) {
 
 async function api(path, opts = {}) {
   const resp = await fetch(path, opts);
-  const body = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(body.detail || body.error || `HTTP ${resp.status}`);
+  let body = {};
+  try { body = await resp.json(); } catch { /* non-JSON body */ }
+  if (!resp.ok) {
+    const detail = Array.isArray(body.detail)
+      ? body.detail.map((d) => (d && d.msg) || JSON.stringify(d)).join("；")
+      : (body.detail || body.error || `HTTP ${resp.status}`);
+    throw new Error(friendly(detail));
+  }
   return body;
+}
+
+function friendly(msg) {
+  const map = [
+    [/no comparable pairs found/i, "没有可配对的单据：文件名需要包含相同的业务编号，且每组至少两份"],
+    [/at least two distinct documents/i, "至少需要两份不同的单据才能比对"],
+    [/exactly two documents are required/i, "比对需要正好两份单据"],
+    [/cannot compare a document with itself/i, "不能拿同一份单据和自己比对"],
+    [/empty upload/i, "上传的是空文件"],
+    [/file too large/i, "文件超过 64MB 上限"],
+    [/data source returned no records/i, "数据源没有返回任何记录，请检查 records_path 与 record_id 设置"],
+    [/document \S+ not found|document not found/i, "找不到该文档（可能已被删除），请重新选择"],
+    [/no files or documents provided/i, "没有收到任何文件或文档"],
+    [/fetch failed/i, "从数据源拉取失败（网络或接口错误）"],
+  ];
+  for (const [re, text] of map) if (re.test(msg)) return text;
+  return msg;
 }
 
 /* ============================ tabs ============================ */
@@ -117,13 +141,18 @@ function removeFromQueue(f) {
 function addFiles(files) {
   for (const f of files) {
     if (!/\.(csv|tsv|txt|xlsx|xlsm)$/i.test(f.name)) continue;
-    state.files.push({ file: f, name: f.name, kind: kindOf(f.name), base: baseKey(f.name) });
+    const dup = state.files.some(
+      (x) => !x.doc && x.name === f.name && x.size === f.size
+    );
+    if (dup) continue;
+    state.files.push({ file: f, name: f.name, size: f.size, kind: kindOf(f.name), base: baseKey(f.name) });
   }
   renderFiles();
 }
 
 function addDocToQueue(doc) {
-  state.files.push({ doc: true, id: doc.id, name: doc.name, kind: kindOf(doc.name), base: baseKey(doc.name), size: doc.size });
+  if (state.files.some((x) => x.doc && x.id === doc.id)) return;
+  state.files.push({ doc: true, id: doc.id, name: doc.name, size: doc.size, kind: kindOf(doc.name), base: baseKey(doc.name) });
   renderFiles();
   showView("compare");
 }
@@ -232,12 +261,16 @@ async function showResults(job) {
   const loaded = [];
   for (const pair of job.pairs) {
     if (pair.status === "done" && pair.report_id) {
-      const r = await api(`/api/reports/${pair.report_id}`);
-      loaded.push({ pair, report: r });
-      totals.total += r.summary.total;
-      totals.high += r.summary.high;
-      totals.medium += r.summary.medium;
-      totals.low += r.summary.low;
+      try {
+        const r = await api(`/api/reports/${pair.report_id}`);
+        loaded.push({ pair, report: r });
+        totals.total += r.summary.total;
+        totals.high += r.summary.high;
+        totals.medium += r.summary.medium;
+        totals.low += r.summary.low;
+      } catch { /* one bad report must not kill the page */ }
+    } else {
+      loaded.push({ pair, report: null });
     }
   }
 
@@ -251,6 +284,14 @@ async function showResults(job) {
   pairsBox.innerHTML = "";
   for (const { pair, report } of loaded) {
     pairsBox.appendChild(makePair(pair, report));
+  }
+
+  const failedCount = job.pairs.filter((p) => p.status === "failed").length;
+  if (failedCount) {
+    const note = document.createElement("div");
+    note.className = "unpaired";
+    note.innerHTML = `<b>${failedCount} 对比对失败</b>，展开对应单据查看原因（常见原因：文件无法解析、空文档）。`;
+    pairsBox.prepend(note);
   }
 
   if (job.unpaired && job.unpaired.length) {
@@ -310,6 +351,7 @@ function renderPairBody(report, sec) {
   }
 
   let rows = "";
+  const pill = { high: "f", medium: "m", low: "l" };
   for (const f of findings) {
     let ev = "";
     for (const e of f.evidence) {
@@ -320,7 +362,7 @@ function renderPairBody(report, sec) {
     }
     rows +=
       `<tr class="fd" data-fid="${esc(f.id)}">` +
-      `<td><span class="pill ${f.severity[0]}">${esc(f.severity)}</span></td>` +
+      `<td><span class="pill ${pill[f.severity] || "f"}">${esc(f.severity)}</span></td>` +
       `<td>${esc(f.field)}</td>` +
       `<td>${esc(f.left_value)} → ${esc(f.right_value)}</td>` +
       `<td>${esc(f.claim)}<br><small style="color:var(--muted)">${ev}</small></td>` +

@@ -93,14 +93,42 @@ def evaluate(
     right_table: Table,
     pairs: list[AlignedPair],
 ) -> list[Finding]:
-    """Run every rule over the aligned pairs and collect findings."""
+    """Run every rule over the aligned pairs and collect findings.
+
+    The built-in auto rule never double-reports a column that an *applying*
+    explicit rule already covers for the same pair — so a configured rule set
+    (e.g. ``数量`` with kg/g exemption) stays the single judge for its
+    columns while the auto rule fills the gaps elsewhere.
+    """
+    auto_id = DEFAULT_RULE["id"]
+    explicit = [rule for rule in rules if rule.id != auto_id]
     findings: list[Finding] = []
     for rule in rules:
         for pair in pairs:
             if not _rule_applies(rule, pair):
                 continue
-            findings.extend(_diff_pair(rule, pair))
+            if rule.id == auto_id and explicit:
+                covered = _explicit_covered(explicit, pair)
+                if covered is None:
+                    continue  # an explicit rule claims every column
+                findings.extend(_diff_pair(rule, pair, skip=covered))
+            else:
+                findings.extend(_diff_pair(rule, pair))
     return findings
+
+
+def _explicit_covered(explicit: list[Rule], pair: AlignedPair) -> set[str] | None:
+    """Headers an *applying* explicit rule claims; ``None`` means 'all'."""
+    covered: set[str] = set()
+    for rule in explicit:
+        if not _rule_applies(rule, pair):
+            continue
+        if rule.compare:
+            columns = [rule.compare] if isinstance(rule.compare, str) else list(rule.compare)
+            covered.update(columns)
+        else:
+            return None
+    return covered
 
 
 def _rule_applies(rule: Rule, pair: AlignedPair) -> bool:
@@ -110,11 +138,15 @@ def _rule_applies(rule: Rule, pair: AlignedPair) -> bool:
     )
 
 
-def _compare_columns(rule: Rule, pair: AlignedPair) -> Iterable[tuple[str, Cell, Cell]]:
+def _compare_columns(
+    rule: Rule, pair: AlignedPair, skip: set[str] | None = None
+) -> Iterable[tuple[str, Cell, Cell]]:
     """Yield ``(header, left_cell, right_cell)`` triples for one pair."""
     if rule.compare:
         headers = [rule.compare] if isinstance(rule.compare, str) else list(rule.compare)
         for header in headers:
+            if skip and header in skip:
+                continue
             left_cell = pair.left.by_header(header)
             right_cell = pair.right.by_header(header)
             if left_cell is not None and right_cell is not None:
@@ -122,14 +154,17 @@ def _compare_columns(rule: Rule, pair: AlignedPair) -> Iterable[tuple[str, Cell,
         return
     # auto mode: every shared header that has numbers on both sides
     for cell in pair.left.cells:
-        right_cell = pair.right.by_header(cell.loc.header)
+        header = cell.loc.header
+        if skip and header in skip:
+            continue
+        right_cell = pair.right.by_header(header)
         if right_cell is not None and cell.value is not None and right_cell.value is not None:
-            yield cell.loc.header, cell, right_cell
+            yield header, cell, right_cell
 
 
-def _diff_pair(rule: Rule, pair: AlignedPair) -> list[Finding]:
+def _diff_pair(rule: Rule, pair: AlignedPair, skip: set[str] | None = None) -> list[Finding]:
     out: list[Finding] = []
-    for header, left_cell, right_cell in _compare_columns(rule, pair):
+    for header, left_cell, right_cell in _compare_columns(rule, pair, skip=skip):
         if left_cell.value is None or right_cell.value is None:
             continue
         if _within_tolerance(left_cell.value, right_cell.value, rule.tolerance):
@@ -139,8 +174,7 @@ def _diff_pair(rule: Rule, pair: AlignedPair) -> list[Finding]:
         if rule.require_both_sides and (not left_cell.loc.row or not right_cell.loc.row):
             continue
         claim = (
-            f"{header}: {left_cell.text.strip()} vs {right_cell.text.strip()} "
-            f"on key {pair.key!r}"
+            f"{header}: {left_cell.text.strip()} vs {right_cell.text.strip()} on key {pair.key!r}"
         )
         out.append(
             Finding(

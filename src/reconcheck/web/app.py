@@ -20,10 +20,13 @@ Run: ``reconcheck-api`` (binds ``0.0.0.0:8765`` by default).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
 import re
+import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -42,8 +45,9 @@ from ..errors import ReconCheckError
 from ..models import Document
 from ..parse import load_document
 from ..parse.tabular import document_from_records
+from ..rules import DEFAULT_RULE, Rule, load_rules
 from .datasources import DataSource, load_datasources, save_datasources
-from .store import DocumentStore
+from .store import DocumentStore, safe_id
 
 STATIC_DIR = Path(__file__).parent / "static"
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -51,6 +55,11 @@ DEFAULT_RULES_DIR = REPO_ROOT / "examples" / "rules"
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _PREVIEW_ROWS = 100
+MAX_UPLOAD_BYTES = 64 * 1024 * 1024  # 64 MB per uploaded file
+
+
+class UploadTooLarge(Exception):
+    """Raised by storage when an uploaded file exceeds MAX_UPLOAD_BYTES."""
 
 
 def _default_rules_dir() -> Path | None:
@@ -79,12 +88,23 @@ class JobStore:
                 self._jobs = {}
 
     def _persist(self) -> None:
+        tmp: str | None = None
         try:
-            self._index_path.write_text(
-                json.dumps(self._jobs, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            fd, tmp = tempfile.mkstemp(dir=str(self.root), suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(self._jobs, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._index_path)
         except OSError:
-            pass
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def queued_jobs(self) -> list[str]:
+        """Jobs that were queued but not finished (replayed after a restart)."""
+        with self._lock:
+            return [jid for jid, job in self._jobs.items() if job.get("status") == "queued"]
 
     def create_job(self, job: dict[str, Any]) -> None:
         with self._lock:
@@ -111,8 +131,14 @@ class JobStore:
         name = upload.filename or f"file_{index}"
         safe = _SAFE_NAME.sub("_", name)[:120] or f"file_{index}"
         target = job_dir / f"{index:02d}_{safe}"
+        total = 0
         with target.open("wb") as out:
             while chunk := upload.file.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    raise UploadTooLarge(f"{name}: over {MAX_UPLOAD_BYTES // 1024 // 1024} MB")
                 out.write(chunk)
         return target
 
@@ -178,9 +204,7 @@ def _doc_from_meta(docs: DocumentStore, meta: dict[str, Any]) -> Document:
         try:
             records = json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError as err:
-            raise ReconCheckError(
-                f"stored records of '{meta['name']}' are corrupt: {err}"
-            ) from err
+            raise ReconCheckError(f"stored records of '{meta['name']}' are corrupt: {err}") from err
         return document_from_records(records, meta["name"])
     path = docs.content_path(meta["id"], meta)
     if path is None:
@@ -212,9 +236,7 @@ def _doc_preview(docs: DocumentStore, meta: dict[str, Any]) -> dict[str, Any]:
 
 
 class Worker:
-    def __init__(
-        self, store: JobStore, documents: DocumentStore, rules_dir: Path | None
-    ) -> None:
+    def __init__(self, store: JobStore, documents: DocumentStore, rules_dir: Path | None) -> None:
         self.store = store
         self.documents = documents
         self.rules_dir = rules_dir
@@ -226,6 +248,9 @@ class Worker:
             return
         self._thread = threading.Thread(target=self._loop, daemon=True, name="reconcheck-worker")
         self._thread.start()
+        # replay jobs that were still queued when the process restarted
+        for job_id in self.store.queued_jobs():
+            self.submit(job_id)
 
     def stop(self) -> None:
         if self._thread is None:
@@ -257,6 +282,18 @@ class Worker:
             return _doc_from_meta(self.documents, meta)
         return load_document(entry["path"])
 
+    def _rules_for(self) -> list[Rule]:
+        """Configured rules plus the built-in auto rule as a baseline.
+
+        The auto rule fills the gaps for tables the configured rules don't
+        know; ``evaluate`` already de-duplicates columns an explicit rule
+        covers for the same pair.
+        """
+        rules = load_rules(self.rules_dir)
+        if not any(rule.id == DEFAULT_RULE["id"] for rule in rules):
+            rules = [*rules, Rule.from_dict(DEFAULT_RULE)]
+        return rules
+
     def _process(self, job_id: str) -> None:
         job = self.store.get_job(job_id)
         if job is None:
@@ -264,6 +301,7 @@ class Worker:
         self.store.update_job(job_id, status="running", started_at=time.time())
         by_name = {entry["name"]: entry for entry in job["files"]}
         pairs = job["pairs"]
+        rule_list = self._rules_for()
         for i, pair in enumerate(pairs):
             try:
                 left_doc = self._load_entry(by_name[pair["left"]])
@@ -271,7 +309,7 @@ class Worker:
                 report, _findings = compare_documents(
                     left_doc,
                     right_doc,
-                    rules=self.rules_dir,
+                    rules=rule_list,
                     match_on=job["config"].get("match_on"),
                     normalize=job["config"].get("normalize"),
                 )
@@ -289,9 +327,9 @@ class Worker:
                 )
             except ReconCheckError as err:
                 pair.update(status="failed", error=str(err))
-            self.store.update_job(
-                job_id, progress={"done": i + 1, "total": len(pairs)}
-            )
+            except Exception as err:  # noqa: BLE001 - one bad pair must not kill the batch
+                pair.update(status="failed", error=f"{type(err).__name__}: {err}")
+            self.store.update_job(job_id, progress={"done": i + 1, "total": len(pairs)})
         self.store.update_job(job_id, status="done", finished_at=time.time())
 
 
@@ -356,15 +394,20 @@ def create_app(
     ) -> JSONResponse:
         ids = [i.strip() for i in (doc_ids or "").split(",") if i.strip()]
         if (files or []) and ids:
-            raise HTTPException(
-                status_code=400, detail="pass either files or doc_ids, not both"
-            )
+            raise HTTPException(status_code=400, detail="pass either files or doc_ids, not both")
+        if len(ids) == 2 and ids[0] == ids[1]:
+            raise HTTPException(status_code=400, detail="cannot compare a document with itself")
         docs: list[Document] = []
-        for doc_id in ids:
-            meta = documents.get(doc_id)
-            if meta is None:
-                raise HTTPException(status_code=404, detail=f"document {doc_id} not found")
-            docs.append(_doc_from_meta(documents, meta))
+        try:
+            for doc_id in ids:
+                if not safe_id(doc_id):
+                    raise HTTPException(status_code=404, detail=f"document {doc_id} not found")
+                meta = documents.get(doc_id)
+                if meta is None:
+                    raise HTTPException(status_code=404, detail=f"document {doc_id} not found")
+                docs.append(_doc_from_meta(documents, meta))
+        except ReconCheckError as err:
+            raise HTTPException(status_code=422, detail=str(err)) from err
         if files:
             tmp = root / "tmp" / uuid.uuid4().hex[:8]
             tmp.mkdir(parents=True, exist_ok=True)
@@ -372,11 +415,19 @@ def create_app(
             try:
                 for i, upload in enumerate(files):
                     target = tmp / _SAFE_NAME.sub("_", upload.filename or f"file_{i}")
+                    total = 0
                     with target.open("wb") as out:
                         while chunk := await upload.read(1024 * 1024):
+                            total += len(chunk)
+                            if total > MAX_UPLOAD_BYTES:
+                                raise HTTPException(
+                                    status_code=413, detail=f"{upload.filename}: file too large"
+                                )
                             out.write(chunk)
                     paths.append(target)
                 docs = [load_document(p) for p in paths]
+            except ReconCheckError as err:
+                raise HTTPException(status_code=422, detail=str(err)) from err
             finally:
                 for p in paths:
                     p.unlink(missing_ok=True)
@@ -419,37 +470,70 @@ def create_app(
             used_names.add(base)
             return base
 
-        for i, upload in enumerate(files or []):
-            name = unique(upload.filename or f"file_{i}")
-            path = store.save_upload(job_id, upload, i)
-            entries.append(
-                {
-                    "name": name,
-                    "kind": guess_kind(name),
-                    "base": base_key(name),
-                    "path": str(path),
-                    "doc_id": None,
-                }
-            )
-        for raw in (doc_ids or "").split(","):
-            doc_id = raw.strip()
-            if not doc_id:
+        try:
+            for i, upload in enumerate(files or []):
+                name = unique(upload.filename or f"file_{i}")
+                path = store.save_upload(job_id, upload, i)
+                entries.append(
+                    {
+                        "name": name,
+                        "kind": guess_kind(name),
+                        "base": base_key(name),
+                        "path": str(path),
+                        "doc_id": None,
+                    }
+                )
+            for raw in (doc_ids or "").split(","):
+                doc_id = raw.strip()
+                if not doc_id:
+                    continue
+                if not safe_id(doc_id):
+                    raise HTTPException(status_code=404, detail=f"document {doc_id} not found")
+                meta = documents.get(doc_id)
+                if meta is None:
+                    raise HTTPException(status_code=404, detail=f"document {doc_id} not found")
+                name = unique(meta["name"])
+                entries.append(
+                    {
+                        "name": name,
+                        "kind": guess_kind(name),
+                        "base": base_key(name),
+                        "path": None,
+                        "doc_id": doc_id,
+                    }
+                )
+        except HTTPException:
+            shutil.rmtree(store.files_dir / job_id, ignore_errors=True)
+            raise
+        except UploadTooLarge as err:
+            shutil.rmtree(store.files_dir / job_id, ignore_errors=True)
+            raise HTTPException(status_code=413, detail=str(err)) from err
+
+        # drop duplicate entries: same doc_id twice, or identical uploaded
+        # content twice (the "-2" rename keeps the same grouping stem, which
+        # would otherwise turn into a pointless self-comparison)
+        upload_hashes: dict[str, str] = {}
+        unique_entries: list[dict[str, Any]] = []
+        seen_identity: set[str] = set()
+        for entry in entries:
+            identity = entry["doc_id"] or entry["path"]
+            if identity in seen_identity:
                 continue
-            meta = documents.get(doc_id)
-            if meta is None:
-                raise HTTPException(status_code=404, detail=f"document {doc_id} not found")
-            name = unique(meta["name"])
-            entries.append(
-                {
-                    "name": name,
-                    "kind": guess_kind(name),
-                    "base": base_key(name),
-                    "path": None,
-                    "doc_id": doc_id,
-                }
-            )
+            if entry["path"]:
+                digest = hashlib.sha256(Path(entry["path"]).read_bytes()).hexdigest()
+                if digest in upload_hashes:
+                    continue
+                upload_hashes[digest] = identity
+            seen_identity.add(identity)
+            unique_entries.append(entry)
+        entries = unique_entries
         if not entries:
             raise HTTPException(status_code=400, detail="no files or documents provided")
+        if len(entries) < 2:
+            raise HTTPException(
+                status_code=422,
+                detail="at least two distinct documents are required to compare",
+            )
 
         pairs: list[dict[str, Any]] = []
         unpaired: list[str] = []
@@ -495,6 +579,8 @@ def create_app(
 
     @api.get("/reports/{report_id}")
     def get_report(report_id: str) -> JSONResponse:
+        if not safe_id(report_id):
+            raise HTTPException(status_code=404, detail="report not found")
         report = store.get_report(report_id)
         if report is None:
             raise HTTPException(status_code=404, detail="report not found")
@@ -516,11 +602,15 @@ def create_app(
     async def register_documents(files: list[UploadFile] = File(...)) -> dict[str, Any]:
         created: list[dict[str, Any]] = []
         for upload in files:
-            data = await upload.read()
-            if not data:
-                continue
             name = upload.filename or "unnamed"
-            doc_id = documents.register(name, data, source="upload")
+            data = bytearray()
+            while chunk := await upload.read(1024 * 1024):
+                if len(data) + len(chunk) > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail=f"{name}: file too large")
+                data.extend(chunk)
+            if not data:
+                raise HTTPException(status_code=422, detail=f"{name}: empty upload")
+            doc_id = documents.register(name, bytes(data), source="upload")
             meta = documents.get(doc_id)
             if meta is not None:
                 created.append(meta)
@@ -528,6 +618,8 @@ def create_app(
 
     @api.get("/documents/{doc_id}")
     def get_document(doc_id: str) -> dict[str, Any]:
+        if not safe_id(doc_id):
+            raise HTTPException(status_code=404, detail="document not found")
         meta = documents.get(doc_id)
         if meta is None:
             raise HTTPException(status_code=404, detail="document not found")
@@ -535,16 +627,19 @@ def create_app(
 
     @api.get("/documents/{doc_id}/content")
     def document_content(doc_id: str) -> Response:
+        if not safe_id(doc_id):
+            raise HTTPException(status_code=404, detail="document not found")
         meta = documents.get(doc_id)
         if meta is None:
             raise HTTPException(status_code=404, detail="document not found")
         data = documents.content(doc_id)
         if data is None:
             raise HTTPException(status_code=404, detail="document content missing")
+        safe_name = re.sub(r'[\r\n"]', "", str(meta["name"]))[:120] or "download"
         return Response(
             content=data,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{meta["name"]}"'},
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
         )
 
     @api.delete("/documents/{doc_id}")
@@ -576,8 +671,9 @@ def create_app(
             raise HTTPException(status_code=400, detail="name is required")
         if not str(payload.get("url", "")).strip():
             raise HTTPException(status_code=400, detail="url is required")
-        if not str(payload.get("token", "")):
-            payload["token"] = existing.token  # keep the stored secret
+        if not payload.get("token"):
+            payload["token"] = existing.token  # empty/omitted keeps the stored secret
+        payload["id"] = ds_id  # a body-borne id must not silently retarget
         updated = DataSource.from_dict(payload, existing_id=ds_id)
         sources = [updated if s.id == ds_id else s for s in sources]
         save_datasources(root, sources)
@@ -615,9 +711,12 @@ def create_app(
         try:
             if source.type == "records":
                 records = source.records(record_id)
-                name = (
-                    record_id or source.name or "records"
-                ) + ".json"
+                if not records:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=("data source returned no records — check records_path / record_id"),
+                    )
+                name = (record_id or source.name or "records") + ".json"
                 data = json.dumps(records, ensure_ascii=False).encode("utf-8")
                 doc_id = documents.register(
                     name, data, source="records", datasource_id=ds_id, ext_hint=".json"
@@ -625,9 +724,7 @@ def create_app(
             else:
                 data = source.fetch_bytes(record_id)
                 name = record_id or (Path(source.url.split("?")[0]).name or source.name or "file")
-                doc_id = documents.register(
-                    name, data, source="datasource", datasource_id=ds_id
-                )
+                doc_id = documents.register(name, data, source="datasource", datasource_id=ds_id)
         except HTTPError as err:
             raise HTTPException(status_code=502, detail=f"fetch failed: {err}") from err
         meta = documents.get(doc_id)
@@ -647,6 +744,7 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": job["id"],
         "status": job["status"],
+        "error": job.get("error"),
         "progress": job.get("progress"),
         "files": job["files"],
         "unpaired": job.get("unpaired", []),

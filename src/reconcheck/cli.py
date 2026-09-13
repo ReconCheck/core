@@ -32,7 +32,7 @@ def run_compare(args: argparse.Namespace) -> int:
             normalize=_parse_normalize(args.normalize),
             sheet=args.sheet,
         )
-    except ReconCheckError as err:
+    except (ReconCheckError, OSError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
     if args.output:
@@ -62,7 +62,9 @@ def main(argv: list[str] | None = None) -> int:
     cmp = sub.add_parser("compare", help="compare two documents")
     cmp.add_argument("left", help="left document (CSV/TSV/XLSX)")
     cmp.add_argument("right", help="right document (CSV/TSV/XLSX)")
-    cmp.add_argument("-o", "--output", type=Path, default=None, help="write JSON report here (default: stdout)")
+    cmp.add_argument(
+        "-o", "--output", type=Path, default=None, help="write JSON report here (default: stdout)"
+    )
     cmp.add_argument(
         "--rules",
         default=None,

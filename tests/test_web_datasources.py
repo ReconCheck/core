@@ -26,6 +26,16 @@ class _Handler(BaseHTTPRequestHandler):
     routes: dict = {}
 
     def do_GET(self):  # noqa: N802
+        if self.path == "/auth/file.csv":
+            if self.headers.get("X-API-Key") == "SECRET123":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv")
+                self.end_headers()
+                self.wfile.write(PO_BYTES)
+            else:
+                self.send_response(401)
+                self.end_headers()
+            return
         route = self.routes.get(self.path)
         if route is None:
             self.send_response(404)
@@ -58,7 +68,10 @@ def httpd() -> str:
             200,
             "application/json",
             json.dumps(
-                [{"id": "po", "name": "PO-240913-001.csv"}, {"id": "inv", "name": "INV-240913-001.csv"}],
+                [
+                    {"id": "po", "name": "PO-240913-001.csv"},
+                    {"id": "inv", "name": "INV-240913-001.csv"},
+                ],
                 ensure_ascii=False,
             ).encode("utf-8"),
         ),
@@ -104,7 +117,9 @@ def test_datasource_crud(tmp_path: Path, httpd: str):
         assert len(listed) == 1 and listed[0]["id"] == ds["id"]
 
         # update without touching the secret keeps it
-        r = client.put(f"/api/datasources/{ds['id']}", json={"name": "ERP v2", "url": f"{httpd}/api/inv"})
+        r = client.put(
+            f"/api/datasources/{ds['id']}", json={"name": "ERP v2", "url": f"{httpd}/api/inv"}
+        )
         assert r.status_code == 200
         assert r.json()["name"] == "ERP v2"
 
@@ -146,20 +161,79 @@ def test_datasource_list_items(tmp_path: Path, httpd: str):
     with _client(tmp_path) as client:
         ds = client.post(
             "/api/datasources",
-            json={"name": "files", "type": "file", "url": f"{httpd}/file/po.csv", "list_url": f"{httpd}/items"},
+            json={
+                "name": "files",
+                "type": "file",
+                "url": f"{httpd}/file/po.csv",
+                "list_url": f"{httpd}/items",
+            },
         ).json()
         items = client.post(f"/api/datasources/{ds['id']}/list").json()["items"]
         assert len(items) == 2
         assert items[0]["name"] == "PO-240913-001.csv"
 
 
+def test_datasource_auth_header_forwarded(tmp_path: Path, httpd: str):
+    with _client(tmp_path) as client:
+        good = client.post(
+            "/api/datasources",
+            json={
+                "name": "au",
+                "type": "file",
+                "url": f"{httpd}/auth/file.csv",
+                "auth": "header",
+                "header_name": "X-API-Key",
+                "token": "SECRET123",
+            },
+        ).json()
+        r = client.post(f"/api/datasources/{good['id']}/probe").json()
+        assert r["ok"] is True and r["status"] == 200
+
+        doc = client.post(f"/api/datasources/{good['id']}/fetch", json={}).json()
+        assert doc["size"] == len(PO_BYTES)
+
+        bad = client.post(
+            "/api/datasources",
+            json={
+                "name": "au-bad",
+                "type": "file",
+                "url": f"{httpd}/auth/file.csv",
+                "auth": "header",
+                "header_name": "X-API-Key",
+                "token": "WRONG",
+            },
+        ).json()
+        r = client.post(f"/api/datasources/{bad['id']}/probe").json()
+        assert r["ok"] is False and r["status"] == 401
+        fetch = client.post(f"/api/datasources/{bad['id']}/fetch", json={})
+        assert fetch.status_code == 502
+
+
+def test_fetch_records_missing_path_is_422(tmp_path: Path, httpd: str):
+    with _client(tmp_path) as client:
+        ds = client.post(
+            "/api/datasources",
+            json={
+                "name": "bad-path",
+                "type": "records",
+                "url": f"{httpd}/api/po",
+                "records_path": "data.items",
+            },
+        ).json()
+        r = client.post(f"/api/datasources/{ds['id']}/fetch", json={})
+        assert r.status_code == 422
+        assert "no records" in r.json()["detail"]
+
+
 def test_fetch_file_document_and_compare(tmp_path: Path, httpd: str):
     with _client(tmp_path) as client:
         po_ds = client.post(
-            "/api/datasources", json={"name": "po-src", "type": "file", "url": f"{httpd}/file/po.csv"}
+            "/api/datasources",
+            json={"name": "po-src", "type": "file", "url": f"{httpd}/file/po.csv"},
         ).json()
         inv_ds = client.post(
-            "/api/datasources", json={"name": "inv-src", "type": "file", "url": f"{httpd}/file/invoice.csv"}
+            "/api/datasources",
+            json={"name": "inv-src", "type": "file", "url": f"{httpd}/file/invoice.csv"},
         ).json()
         po_doc = client.post(f"/api/datasources/{po_ds['id']}/fetch", json={}).json()
         inv_doc = client.post(f"/api/datasources/{inv_ds['id']}/fetch", json={}).json()
@@ -200,11 +274,21 @@ def test_jobs_with_doc_ids(tmp_path: Path, httpd: str):
     with _client(tmp_path) as client:
         po_ds = client.post(
             "/api/datasources",
-            json={"name": "PO-240913-001", "type": "records", "url": f"{httpd}/api/po", "records_path": "data"},
+            json={
+                "name": "PO-240913-001",
+                "type": "records",
+                "url": f"{httpd}/api/po",
+                "records_path": "data",
+            },
         ).json()
         inv_ds = client.post(
             "/api/datasources",
-            json={"name": "INV-240913-001", "type": "records", "url": f"{httpd}/api/inv", "records_path": "data"},
+            json={
+                "name": "INV-240913-001",
+                "type": "records",
+                "url": f"{httpd}/api/inv",
+                "records_path": "data",
+            },
         ).json()
         po_doc = client.post(f"/api/datasources/{po_ds['id']}/fetch", json={}).json()
         inv_doc = client.post(f"/api/datasources/{inv_ds['id']}/fetch", json={}).json()

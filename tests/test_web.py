@@ -115,3 +115,112 @@ def test_rules_endpoint(tmp_path: Path):
         body = r.json()
         assert body["default"] == "auto-numeric-diff (built-in)"
         assert "base.yaml" in body["files"]
+
+
+def test_job_auto_rule_baseline_for_unknown_headers(tmp_path: Path):
+    """Tables the example rules don't know still get the auto rule."""
+    with _client(tmp_path) as client:
+        left = b"id,amount\n1,100.00\n2,100.00\n"
+        right = b"id,amount\n1,99.00\n2,100.00\n"
+        r = client.post(
+            "/api/jobs",
+            files=[
+                ("files", ("PO-240913-001.csv", left, "text/csv")),
+                ("files", ("INV-240913-001.csv", right, "text/csv")),
+            ],
+        )
+        assert r.status_code == 200
+        job_id = r.json()["id"]
+        done = None
+        for _ in range(100):
+            j = client.get(f"/api/jobs/{job_id}").json()
+            if j["status"] == "done":
+                done = j
+                break
+            time.sleep(0.1)
+        assert done is not None
+        assert done["pairs"][0]["findings"] == 1  # amount mismatch via auto rule
+        assert done["pairs"][0]["medium"] == 1  # auto rule defaults to medium
+
+
+def test_job_pair_failure_is_visible(tmp_path: Path):
+    """A failed pair keeps its error in the job view (not 'unknown')."""
+    with _client(tmp_path) as client:
+        r = client.post(
+            "/api/jobs",
+            files=[
+                ("files", ("PO-240913-001.csv", b"", "text/csv")),
+                ("files", ("INV-240913-001.csv", b"id,amount\n1,100.00\n", "text/csv")),
+            ],
+        )
+        job_id = r.json()["id"]
+        done = None
+        for _ in range(100):
+            j = client.get(f"/api/jobs/{job_id}").json()
+            if j["status"] == "done":
+                done = j
+                break
+            time.sleep(0.1)
+        assert done is not None
+        assert done["pairs"][0]["status"] == "failed"
+        assert done["pairs"][0]["error"]
+
+
+def test_upload_over_limit_is_413(tmp_path: Path, monkeypatch):
+    import reconcheck.web.app as webapp
+
+    monkeypatch.setattr(webapp, "MAX_UPLOAD_BYTES", 32)
+    with _client(tmp_path) as client:
+        r = client.post(
+            "/api/documents",
+            files=[("files", ("big.csv", b"x" * 100, "text/csv"))],
+        )
+    assert r.status_code == 413
+
+
+def test_document_delete_rejects_path_traversal(tmp_path: Path):
+    marker = tmp_path / "keep.txt"
+    marker.write_text("do not delete", encoding="utf-8")
+    with _client(tmp_path) as client:
+        # httpx may normalize the raw "..%2F" segments into a 405 no-match;
+        # either way the request must never reach the store
+        r = client.delete("/api/documents/..%2F..%2Fkeep.txt")
+        assert r.status_code in (404, 405)
+        # non-hex ids are refused idempotently without touching disk
+        r2 = client.delete("/api/documents/nothexid")
+        assert r2.status_code == 200 and r2.json().get("ok") is False
+    assert marker.read_text(encoding="utf-8") == "do not delete"
+
+
+def test_jobs_skip_duplicate_document_ids(tmp_path: Path):
+    """The same doc_id twice in one job must not produce a self-comparison."""
+    with _client(tmp_path) as client:
+        with open(PO, "rb") as f:
+            doc = client.post(
+                "/api/documents", files=[("files", ("PO-240913-001.csv", f, "text/csv"))]
+            ).json()["documents"][0]
+        with open(INVOICE, "rb") as f:
+            r = client.post(
+                "/api/jobs",
+                data={"doc_ids": f"{doc['id']},{doc['id']}"},
+                files=[("files", ("INV-240913-001.csv", f, "text/csv"))],
+            )
+        assert r.status_code == 200
+        job = r.json()
+        assert len(job["pairs"]) == 1
+        assert job["pairs"][0]["left"] != job["pairs"][0]["right"]
+
+
+def test_jobs_identical_uploads_are_deduplicated(tmp_path: Path):
+    """Uploading the very same bytes twice must not self-compare."""
+    with _client(tmp_path) as client:
+        data = b"id,amount\n1,100.00\n"
+        r = client.post(
+            "/api/jobs",
+            files=[
+                ("files", ("PO-240913-001.csv", data, "text/csv")),
+                ("files", ("PO-240913-001.csv", data, "text/csv")),
+            ],
+        )
+        assert r.status_code == 422  # only one distinct entry survives
+        assert "two distinct documents" in r.json()["detail"]

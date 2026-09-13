@@ -67,6 +67,7 @@ class DataSource:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], existing_id: str | None = None) -> DataSource:
+        raw_token = payload.get("token")
         return cls(
             id=payload.get("id") or existing_id or uuid.uuid4().hex[:10],
             name=str(payload.get("name", "")).strip(),
@@ -74,7 +75,7 @@ class DataSource:
             url=str(payload.get("url", "")).strip(),
             method=str(payload.get("method", "GET")).upper(),
             auth=str(payload.get("auth", "none")),
-            token=str(payload.get("token", "")) or "",
+            token=str(raw_token) if raw_token else "",
             header_name=str(payload.get("header_name", "")).strip(),
             headers=payload.get("headers") or {},
             records_path=str(payload.get("records_path", "")).strip(),
@@ -153,17 +154,16 @@ class DataSource:
         out: list[dict[str, Any]] = []
         for e in entries:
             if isinstance(e, dict) and e.get(id_field) is not None:
-                out.append(
-                    {"id": str(e[id_field]), "name": str(e.get(name_field) or e[id_field])}
-                )
+                out.append({"id": str(e[id_field]), "name": str(e.get(name_field) or e[id_field])})
         return out
 
     def probe(self) -> dict[str, Any]:
         """Connectivity test used by the frontend 'test' button."""
         try:
             r = self._request()
+            ok = 200 <= r.status_code < 300
             return {
-                "ok": True,
+                "ok": ok,
                 "status": r.status_code,
                 "bytes": len(r.content),
                 "head": r.text[:200],

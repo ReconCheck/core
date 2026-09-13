@@ -1,7 +1,7 @@
 from conftest import make_table
 from reconcheck.align import align
 from reconcheck.models import Severity, Table
-from reconcheck.rules import Rule, evaluate, load_rules
+from reconcheck.rules import DEFAULT_RULE, Rule, evaluate, load_rules
 
 
 def _rules_dir() -> Table:
@@ -91,3 +91,32 @@ def test_rule_match_on_filters_unrelated_rows():
 def test_auto_rule_yaml_load():
     rules = load_rules("examples/rules")
     assert {r.id for r in rules} == {"po-invoice-amount-mismatch", "po-invoice-qty-unit-agnostic"}
+
+
+def test_auto_rule_never_double_reports_explicit_columns():
+    """A configured rule is the single judge for its column; auto fills gaps."""
+    left = make_table(["id", "数量"], [{"id": "1", "数量": "200"}])
+    right = make_table(["id", "数量"], [{"id": "1", "数量": "199"}])
+    explicit = Rule(
+        id="qty-rule",
+        compare="数量",
+        severity="high",
+        tolerance={"absolute": 0, "relative": 0},
+    )
+    rules = [explicit, Rule.from_dict(DEFAULT_RULE)]
+    pairs = align(left, right, match_on=["id"])
+    findings = evaluate(rules, left, right, pairs)
+    assert len(findings) == 1
+    assert findings[0].rule_id == "qty-rule"
+    assert [f.field for f in findings] == ["数量"]
+
+
+def test_auto_rule_reports_columns_explicit_rules_leave_alone():
+    left = make_table(["id", "amt"], [{"id": "1", "amt": "100.00"}])
+    right = make_table(["id", "amt"], [{"id": "1", "amt": "99.40"}])
+    explicit = Rule(id="other", compare="missing-column")
+    rules = [explicit, Rule.from_dict(DEFAULT_RULE)]
+    pairs = align(left, right, match_on=["id"])
+    findings = evaluate(rules, left, right, pairs)
+    assert [f.field for f in findings] == ["amt"]
+    assert findings[0].rule_id == DEFAULT_RULE["id"]

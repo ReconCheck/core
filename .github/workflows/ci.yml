@@ -23,7 +23,7 @@ jobs:
       - name: Test
         run: pytest
       - name: Frontend unit tests
-        run: node --test tests/js/
+        run: node --test tests/js/*.test.js
       - name: Wheel packs web resources
         run: |
           pip wheel . --no-deps -w /tmp/whl

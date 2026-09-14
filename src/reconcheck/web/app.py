@@ -505,6 +505,32 @@ class Worker:
             except Exception as err:  # noqa: BLE001 - one bad pair must not kill the batch
                 pair.update(status="failed", error=f"{type(err).__name__}: {err}")
             self.store.update_job(job_id, progress={"done": i + 1, "total": len(pairs)})
+        # three-way consensus for every group of three or more documents
+        for group in job.get("groups", []):
+            if len(group.get("files", [])) < 3:
+                continue
+            try:
+                docs = [
+                    parsed.setdefault(f, self._load_entry(by_name[f])) for f in group["files"]
+                ]
+                report = compare_three(
+                    docs,
+                    rules=rule_list,
+                    match_on=job["config"].get("match_on"),
+                    normalize=job["config"].get("normalize"),
+                )
+                group_report_id = uuid.uuid4().hex[:12]
+                self.store.save_report(group_report_id, report)
+                group.update(
+                    report_id=group_report_id,
+                    status="done",
+                    conflict_total=report["summary"]["conflict_total"],
+                    conflict_high=report["summary"]["conflict_high"],
+                )
+            except Exception as err:  # noqa: BLE001 - a bad group must not kill the batch
+                group.update(status="failed", error=f"{type(err).__name__}: {err}")
+        if job.get("groups"):
+            self.store.update_job(job_id, groups=job["groups"])
         self.store.update_job(job_id, status="done", finished_at=time.time())
 
 
@@ -793,11 +819,23 @@ def create_app(
         groups: dict[str, list[str]] = {}
         for entry in entries:
             groups.setdefault(entry["base"], []).append(entry["name"])
+        group_list: list[dict[str, Any]] = []
         for key, names in groups.items():
             names = sorted(names)
             if len(names) < 2:
                 unpaired.extend(names)
                 continue
+            group_list.append(
+                {
+                    "key": key,
+                    "files": names,
+                    "status": "queued",
+                    "report_id": None,
+                    "conflict_total": None,
+                    "conflict_high": None,
+                    "error": None,
+                }
+            )
             for i in range(len(names)):
                 for j in range(i + 1, len(names)):
                     pairs.append(
@@ -816,6 +854,7 @@ def create_app(
             "config": cfg,
             "files": entries,
             "unpaired": unpaired,
+            "groups": group_list,
             "pairs": pairs,
             "progress": {"done": 0, "total": len(pairs)},
         }
@@ -1012,6 +1051,18 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
         "progress": job.get("progress"),
         "files": job["files"],
         "unpaired": job.get("unpaired", []),
+        "groups": [
+            {
+                "key": g.get("key"),
+                "files": g.get("files", []),
+                "status": g.get("status"),
+                "report_id": g.get("report_id"),
+                "conflict_total": g.get("conflict_total"),
+                "conflict_high": g.get("conflict_high"),
+                "error": g.get("error"),
+            }
+            for g in job.get("groups", [])
+        ],
         "pairs": [
             {
                 "key": p.get("key"),

@@ -376,3 +376,52 @@ def test_documents_carry_detected_kind(tmp_path: Path):
         report = r.json()
         kinds = [d["kind"] for d in report["documents"]]
         assert kinds == ["po", "invoice"]
+
+def test_job_groups_and_three_way_report(tmp_path: Path):
+    po = tmp_path / "PO-240913-001.csv"
+    dn = tmp_path / "DN-240913-001.csv"
+    inv = tmp_path / "INV-240913-001.csv"
+    po.write_text("料号,数量\nA1,10\n", encoding="utf-8")
+    dn.write_text("料号,数量\nA1,10\n", encoding="utf-8")
+    inv.write_text("料号,数量\nA1,9\n", encoding="utf-8")
+    with _client(tmp_path) as client:
+        with open(po, "rb") as a, open(dn, "rb") as b, open(inv, "rb") as c:
+            r = client.post(
+                "/api/jobs",
+                files=[
+                    ("files", ("PO-240913-001.csv", a, "text/csv")),
+                    ("files", ("DN-240913-001.csv", b, "text/csv")),
+                    ("files", ("INV-240913-001.csv", c, "text/csv")),
+                ],
+            )
+        assert r.status_code == 200
+        job = r.json()
+        assert len(job["groups"]) == 1
+        group = job["groups"][0]
+        assert group["files"] == sorted([po.name, dn.name, inv.name])
+        assert group["report_id"] is None  # not computed yet at submit time
+
+        for _ in range(100):
+            job = client.get(f"/api/jobs/{job['id']}").json()
+            if job["status"] == "done":
+                break
+            time.sleep(0.1)
+        assert job["status"] == "done"
+        group = job["groups"][0]
+        assert group["status"] == "done"
+        assert group["report_id"]
+        assert group["conflict_total"] >= 1  # invoice quantity disagrees
+        rep = client.get(f"/api/reports/{group['report_id']}").json()
+        assert rep["mode"] == "three-way"
+        # every member appears exactly once, in the group's sorted order
+        assert [d["kind"] for d in rep["documents"]] == ["delivery", "invoice", "po"]
+
+
+def test_two_doc_group_has_no_three_way_report(tmp_path: Path):
+    with _client(tmp_path) as client:
+        r = _upload_pair(client, PO, INVOICE)
+        assert r.status_code == 200
+        job = r.json()
+        assert len(job["groups"]) == 1
+        assert job["groups"][0]["report_id"] is None
+        assert len(job["pairs"]) == 1

@@ -267,40 +267,55 @@ async function showResults(job) {
   // display the original filenames: the server renames duplicates with -2,
   // keep that internal name out of the UI
   const displayName = {};
-  for (const f of job.files || []) displayName[f.name] = f.orig_name || f.name;
+  const fileKind = {};
+  for (const f of job.files || []) {
+    displayName[f.name] = f.orig_name || f.name;
+    fileKind[f.name] = f.kind || kindOf(f.orig_name || f.name);
+  }
 
   const totals = { total: 0, high: 0, medium: 0, low: 0 };
-  const loaded = [];
+  const pairItems = [];
   for (const pair of job.pairs) {
     const shown = {
       ...pair,
       left: displayName[pair.left] || pair.left,
       right: displayName[pair.right] || pair.right,
     };
+    let report = null;
     if (pair.status === "done" && pair.report_id) {
       try {
-        const r = await api(`/api/reports/${pair.report_id}`);
-        loaded.push({ pair: shown, report: r });
-        totals.total += r.summary.total;
-        totals.high += r.summary.high;
-        totals.medium += r.summary.medium;
-        totals.low += r.summary.low;
+        report = await api(`/api/reports/${pair.report_id}`);
+        totals.total += report.summary.total;
+        totals.high += report.summary.high;
+        totals.medium += report.summary.medium;
+        totals.low += report.summary.low;
       } catch { /* one bad report must not kill the page */ }
-    } else {
-      loaded.push({ pair: shown, report: null });
     }
+    pairItems.push({ pair: shown, report });
   }
+
+  const groups = job.groups && job.groups.length ? job.groups : null;
 
   summaryBox.innerHTML =
     `<div class="sum-card total"><div class="num">${totals.total}</div><div class="lbl">差异总计</div></div>` +
     `<div class="sum-card high"><div class="num">${totals.high}</div><div class="lbl">高</div></div>` +
     `<div class="sum-card medium"><div class="num">${totals.medium}</div><div class="lbl">中</div></div>` +
     `<div class="sum-card low"><div class="num">${totals.low}</div><div class="lbl">低</div></div>` +
-    `<div class="sum-card total"><div class="num">${loaded.length}</div><div class="lbl">比对对数</div></div>`;
+    `<div class="sum-card total"><div class="num">${groups ? groups.length : 1}</div><div class="lbl">单据组</div></div>` +
+    `<div class="sum-card total"><div class="num">${pairItems.length}</div><div class="lbl">两两比对</div></div>`;
 
   pairsBox.innerHTML = "";
-  for (const { pair, report } of loaded) {
-    pairsBox.appendChild(makePair(pair, report));
+  if (groups) {
+    for (const g of groups) {
+      const items = pairItems.filter((it) => it.pair.key === g.key);
+      pairsBox.appendChild(makeGroup(g, items, displayName, fileKind));
+    }
+    // pairs whose group vanished (old job data) still render standalone
+    for (const it of pairItems) {
+      if (!groups.some((g) => g.key === it.pair.key)) pairsBox.appendChild(makePair(it.pair, it.report));
+    }
+  } else {
+    for (const { pair, report } of pairItems) pairsBox.appendChild(makePair(pair, report));
   }
 
   const failedCount = job.pairs.filter((p) => p.status === "failed").length;
@@ -319,6 +334,108 @@ async function showResults(job) {
   } else {
     unpairedBox.classList.add("hidden");
   }
+}
+
+/* one card per business-number group: members once, pairwise detail nested,
+   plus the three-way consensus table for groups of 3+ */
+function makeGroup(g, items, displayName, fileKind) {
+  const sec = document.createElement("div");
+  sec.className = "pair closed group";
+
+  const members = (g.files || [])
+    .map((f) => {
+      const name = displayName[f] || f;
+      const kind = fileKind[f] || kindOf(name);
+      return `<span class="badge ${esc(kind)}">${esc(name)}</span>`;
+    })
+    .join(" ");
+  const sumFindings = items.reduce((n, it) => n + (it.pair.findings || 0), 0);
+  const failedPairs = items.filter((it) => it.pair.status === "failed").length;
+  const badges =
+    (g.conflict_total
+      ? `<span class="pill ${g.conflict_high ? "f" : "m"}">三方冲突 ${g.conflict_total}</span>`
+      : "") +
+    (g.status === "failed" ? `<span class="pill f">三方失败</span>` : "") +
+    (failedPairs ? `<span class="pill f">${failedPairs} 对失败</span>` : "") +
+    (sumFindings
+      ? `<span class="pill m">两两差异 ${sumFindings}</span>`
+      : `<span class="pill ok">两两无差异</span>`);
+
+  const head = document.createElement("div");
+  head.className = "pair-head";
+  head.innerHTML =
+    `<span class="pair-title">${members}</span>` +
+    `<span class="pair-meta">${badges}<span class="pair-arrow">▸</span></span>`;
+  head.addEventListener("click", () => {
+    sec.classList.toggle("open");
+    if (sec.classList.contains("open") && !sec.dataset.rendered) {
+      sec.dataset.rendered = "1";
+      renderGroupBody(sec, g, items);
+    }
+  });
+
+  const body = document.createElement("div");
+  body.className = "pair-body";
+  sec.appendChild(head);
+  sec.appendChild(body);
+  return sec;
+}
+
+async function renderGroupBody(sec, g, items) {
+  const body = sec.querySelector(".pair-body");
+  let html = "";
+  if (g.report_id) {
+    html +=
+      `<div class="gw-title">三方核对（多数一致原则，离群值高亮）</div>` +
+      `<div class="gw-slot" data-gw="${esc(g.report_id)}"><p class="muted">加载中…</p></div>`;
+  }
+  if (g.error) html += `<p class="gw-err">三方核对失败：${esc(g.error)}</p>`;
+  html += `<div class="gw-title">两两明细</div>`;
+  body.innerHTML = html;
+  for (const { pair, report } of items) body.appendChild(makePair(pair, report));
+  if (g.report_id) {
+    const holder = body.querySelector(`[data-gw="${CSS.escape(g.report_id)}"]`);
+    try {
+      const r = await api(`/api/reports/${g.report_id}`);
+      holder.innerHTML = renderThreeWay(r);
+    } catch {
+      holder.innerHTML = `<p class="gw-err">三方报告获取失败（可能已被 TTL 清理）</p>`;
+    }
+  }
+}
+
+function renderThreeWay(report) {
+  const conflicts = (report.three_way || []).filter((c) => !c.consistent);
+  const warnings = (report.warnings || [])
+    .map((w) => `<p class="muted">⚠ ${esc(w)}</p>`)
+    .join("");
+  const nameOf = (d) =>
+    d.kind || String(d.path || "").split(/[\\/]/).pop().replace(/\.[^.]+$/, "");
+  const docs = (report.documents || []).map(nameOf);
+  if (!conflicts.length) {
+    const n = (report.three_way || []).length;
+    return (
+      `<p class="gw-ok">✓ 三方一致（${n} 个共有字段全部多数一致）。</p>${warnings}`
+    );
+  }
+  let rows = "";
+  for (const c of conflicts) {
+    const cells = docs
+      .map((name, idx) => {
+        const val = c.values && name in c.values ? c.values[name] : "—";
+        const out = (c.outlier_indices || []).includes(idx);
+        return `<td${out ? ' class="gw-out"' : ""}>${esc(val)}</td>`;
+      })
+      .join("");
+    rows +=
+      `<tr><td>${esc(c.field)}</td>${cells}` +
+      `<td><span class="pill ${c.severity === "high" ? "f" : "m"}">${esc(c.severity)}</span></td></tr>`;
+  }
+  return (
+    `<table class="gw-table"><thead><tr><th>字段</th>` +
+    docs.map((d) => `<th>${esc(d)}</th>`).join("") +
+    `<th>级别</th></tr></thead><tbody>${rows}</tbody></table>${warnings}`
+  );
 }
 
 function makePair(pair, report) {

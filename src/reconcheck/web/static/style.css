@@ -272,3 +272,19 @@ button.danger:hover { background: #fdecea; }
 
 /* ---------- doc preview ---------- */
 .doc-preview { margin-top: 10px; overflow: auto; max-height: 320px; border: 1px solid var(--line); border-radius: 10px; }
+/* ===== three-way consensus table inside group cards ===== */
+.gw-title {
+  margin: 10px 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: .04em;
+}
+.gw-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 6px; }
+.gw-table th, .gw-table td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; }
+.gw-table th { background: #f4f6fa; font-weight: 600; }
+.gw-out { background: #fdecea; color: var(--high); font-weight: 700; }
+.gw-ok { color: var(--ok); font-weight: 600; margin: 4px 0; }
+.gw-err { color: var(--high); margin: 4px 0; }
+.muted { color: var(--muted); font-size: 12px; }
+.pair.group > .pair-body .pair { margin: 6px 0 6px 10px; }

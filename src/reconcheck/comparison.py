@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .align import align
+from .align import align, find_duplicate_keys
 from .errors import EmptyDocumentError
 from .models import Document, Finding
 from .parse import load_document
@@ -31,10 +31,17 @@ def compare_documents(
     if not left.tables or not right.tables:
         raise EmptyDocumentError("one of the documents contains no table")
     lt, rt = left.tables[0], right.tables[0]
-    pairs = align(lt, rt, match_on=match_on or [], normalize=normalize or {})
+    keys = match_on or _shared_keys(lt, rt)
+    pairs = align(lt, rt, match_on=keys, normalize=normalize or {})
     rule_list = rules if isinstance(rules, list) else load_rules(rules)
     findings = evaluate(rule_list, lt, rt, pairs)
-    report = build_report(left, right, findings, aligned_pairs=len(pairs))
+    report = build_report(
+        left,
+        right,
+        findings,
+        aligned_pairs=len(pairs),
+        warnings=_duplicate_key_warnings(lt, rt, keys, normalize or {}),
+    )
     return report, findings
 
 
@@ -60,6 +67,36 @@ def compare_files(
 
 def _rule_list(rules: str | Path | list[Rule] | None) -> list[Rule]:
     return rules if isinstance(rules, list) else load_rules(rules)
+
+
+def _shared_keys(left: Any, right: Any) -> list[str]:
+    """The key columns alignment will use (mirrors align's default resolution)."""
+    if not left.headers or not right.headers:
+        return []
+    shared = [h for h in left.headers if h and h in right.headers]
+    if not shared:
+        raise EmptyDocumentError(
+            "no shared header between the documents — pass --match-on with a column "
+            "both sides contain"
+        )
+    return [shared[0]]
+
+
+def _duplicate_key_warnings(
+    left: Any, right: Any, keys: list[str], normalize: dict[str, str]
+) -> list[str]:
+    """Duplicate key rows would be dropped from alignment (first-wins) — say so."""
+    warnings: list[str] = []
+    for side, table in (("left", left), ("right", right)):
+        dups = find_duplicate_keys(table, keys, normalize)
+        if dups:
+            shown = ", ".join(str(k) for k in dups[:5])
+            more = f" (+{len(dups) - 5} more)" if len(dups) > 5 else ""
+            warnings.append(
+                f"{side} document has duplicate {keys!r} keys ({shown}{more}); "
+                "only the first row per key is compared"
+            )
+    return warnings
 
 
 def _tolerance_for(field: str, rules: list[Rule]) -> tuple[float, float]:
@@ -153,8 +190,23 @@ def compare_three(
             pair_results.append(((names[i], names[j]), len(pairs), findings))
 
     conflicts = _three_way_conflicts(tables, names, match_on, normalize, rule_list)
+    warnings: list[str] = []
+    for name, table in zip(names, tables, strict=True):
+        dups = find_duplicate_keys(table, match_on, normalize)
+        if dups:
+            shown = ", ".join(str(k) for k in dups[:5])
+            more = f" (+{len(dups) - 5} more)" if len(dups) > 5 else ""
+            warnings.append(
+                f"'{name}' has duplicate {match_on!r} keys ({shown}{more}); "
+                "only the first row per key is compared"
+            )
     report = build_threeway_report(
-        docs, names, pair_results, conflicts, aligned=sum(n for _, n, _ in pair_results)
+        docs,
+        names,
+        pair_results,
+        conflicts,
+        aligned=sum(n for _, n, _ in pair_results),
+        warnings=warnings,
     )
     return report
 

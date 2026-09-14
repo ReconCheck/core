@@ -195,3 +195,11 @@ def test_text_exception_flags_differing_text_even_within_tolerance():
     )
     pairs = align(left, right, match_on=["id"])
     assert len(evaluate([rule], left, right, pairs)) == 1
+
+def test_rules_gb18030_file_loads(tmp_path):
+    from reconcheck.rules import load_rules
+
+    p = tmp_path / "rule.yaml"
+    p.write_bytes("- id: r1\n  severity: medium\n  compare: 金额\n".encode("gb18030"))
+    rules = load_rules(p)
+    assert rules[0].compare == "金额"

@@ -10,11 +10,12 @@ DESIGN.md "LLM participation"):
 
 Rules of thumb: OpenAI-compatible endpoints only (base_url + api_key + model,
 operator-configured); documents only travel to an endpoint the operator chose;
-every failure degrades to the deterministic result; findings touched by the
-model are flagged ``llm_augmented`` in the report.
+every failure degrades to the deterministic result.
 
 The concrete OpenAI-compatible client is intentionally not implemented yet —
-this module only pins the contract.
+this module only pins the contract. The report contract ships **without** an
+LLM marker field today; ``explain`` output or an ``llm_augmented`` flag will
+be added to ``report`` as an additive field when a real backend lands.
 """
 
 from __future__ import annotations

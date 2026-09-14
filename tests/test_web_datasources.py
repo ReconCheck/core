@@ -445,3 +445,35 @@ def test_document_upload_and_delete(tmp_path: Path):
 
         assert client.delete(f"/api/documents/{doc['id']}").json()["ok"] is True
         assert client.get("/api/documents").json()["documents"] == []
+
+def test_datasource_token_encrypted_at_rest(tmp_path, monkeypatch):
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    from reconcheck.web.datasources import DataSource, load_datasources, save_datasources
+
+    monkeypatch.setenv("RECONCHECK_DATA_KEY", Fernet.generate_key().decode())
+    src = DataSource(
+        id="abc123", name="erp", type="file",
+        url="https://example.invalid/f", auth="bearer", token="s3cret",
+    )
+    save_datasources(tmp_path, [src])
+    raw = (tmp_path / "datasources" / "abc123.json").read_text(encoding="utf-8")
+    assert "s3cret" not in raw
+    assert '"token_encrypted": true' in raw
+    back = load_datasources(tmp_path)
+    assert back[0].token == "s3cret"  # transparently decrypted on load
+
+
+def test_datasource_token_plaintext_without_key(tmp_path, monkeypatch):
+    from reconcheck.web.datasources import DataSource, load_datasources, save_datasources
+
+    monkeypatch.delenv("RECONCHECK_DATA_KEY", raising=False)
+    src = DataSource(
+        id="abc124", name="erp", type="file",
+        url="https://example.invalid/f", auth="bearer", token="plain1",
+    )
+    save_datasources(tmp_path, [src])
+    raw = (tmp_path / "datasources" / "abc124.json").read_text(encoding="utf-8")
+    assert "plain1" in raw  # backwards-compatible default, documented risk
+    assert load_datasources(tmp_path)[0].token == "plain1"

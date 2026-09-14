@@ -154,3 +154,30 @@ def test_xlsx_corrupt_raises_engine_error_not_bare_zip(tmp_path: Path):
     p.write_bytes(b"PK\x03\x04 not a real zip")
     with pytest.raises(UnsupportedFormatError):
         load_document(p)
+
+def test_multichar_currency_prefixes_parse():
+    from reconcheck.models import Cell, SourceLoc
+
+    for text, want in [
+        ("USD 12.30", Decimal("12.30")),
+        ("-¥12.30", Decimal("-12.30")),
+        ("HK$5", Decimal("5")),
+        ("$ 1,200.00", Decimal("1200.00")),
+        ("cost 12", None),  # a word that merely starts with a letter is no currency
+    ]:
+        c = Cell(text=text, loc=SourceLoc(path="x"))
+        c.coerce()
+        assert c.value == want, text
+
+
+def test_xlsx_zip_bomb_guard(tmp_path, monkeypatch):
+    import zipfile
+
+    from reconcheck.parse import tabular
+
+    p = tmp_path / "bomb.xlsx"
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("xl/worksheets/sheet1.xml", "x" * 400)
+    monkeypatch.setattr(tabular, "_MAX_XLSX_UNCOMPRESSED", 100)
+    with pytest.raises(UnsupportedFormatError, match="uncompresses"):
+        load_document(p)

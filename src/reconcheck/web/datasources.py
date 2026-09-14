@@ -308,6 +308,45 @@ def deep_get(obj: Any, path: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _cipher():
+    """Fernet cipher when ``RECONCHECK_DATA_KEY`` holds a valid key, else None."""
+    import os
+
+    key = os.environ.get("RECONCHECK_DATA_KEY", "").strip()
+    if not key:
+        return None
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:  # optional dependency missing -> plaintext fallback
+        return None
+    try:
+        return Fernet(key.encode())
+    except (ValueError, TypeError):  # malformed key: refuse to pretend-encrypt
+        return None
+
+
+def _encrypt_token(token: str) -> tuple[str, bool]:
+    if not token:
+        return token, False
+    cipher = _cipher()
+    if cipher is None:
+        return token, False
+    return cipher.encrypt(token.encode()).decode(), True
+
+
+def _decrypt_token(payload: dict) -> str:
+    token = payload.get("token") or ""
+    if not payload.get("token_encrypted") or not token:
+        return str(token)
+    cipher = _cipher()
+    if cipher is None:
+        return ""  # stored encrypted but no key configured: treat as absent
+    try:
+        return cipher.decrypt(token.encode()).decode()
+    except Exception:  # noqa: BLE001 - wrong/rotated key must not crash loading
+        return ""
+
+
 def load_datasources(root: Path) -> list[DataSource]:
     folder = root / "datasources"
     out: list[DataSource] = []
@@ -317,6 +356,7 @@ def load_datasources(root: Path) -> list[DataSource]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(payload, dict) and payload.get("id"):
+                payload = {**payload, "token": _decrypt_token(payload)}
                 out.append(DataSource.from_dict(payload))
         except (json.JSONDecodeError, OSError):
             continue
@@ -334,8 +374,12 @@ def save_datasources(root: Path, sources: list[DataSource]) -> None:
         if not stem:
             stem = uuid.uuid4().hex[:10]
         seen.add(stem)
+        payload = source.to_dict(mask=False)
+        enc, was_encrypted = _encrypt_token(str(payload.get("token") or ""))
+        payload["token"] = enc
+        payload["token_encrypted"] = was_encrypted
         (folder / f"{stem}.json").write_text(
-            json.dumps(source.to_dict(mask=False), ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     for path in folder.glob("*.json"):

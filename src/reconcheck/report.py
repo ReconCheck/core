@@ -18,6 +18,7 @@ def build_report(
     right: Document,
     findings: list[Finding],
     aligned_pairs: int = 0,
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the machine-readable report contract."""
     summary: dict[str, int] = {
@@ -39,6 +40,7 @@ def build_report(
         "documents": [left.to_dict(), right.to_dict()],
         "findings": [finding.to_dict() for finding in findings],
         "summary": summary,
+        "warnings": list(warnings or []),
     }
 
 
@@ -48,6 +50,7 @@ def build_threeway_report(
     pair_results: list[tuple[tuple[str, str], int, list[Finding]]],
     conflicts: list[dict[str, Any]],
     aligned: int = 0,
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble a three-way verification report.
 
@@ -76,6 +79,7 @@ def build_threeway_report(
         "documents": [doc.to_dict() for doc in docs],
         "pairs": pairs_payload,
         "three_way": conflicts,
+        "warnings": list(warnings or []),
         "summary": {
             "pairs_evaluated": len(pairs_payload),
             "pair_findings_total": total_pair_findings,

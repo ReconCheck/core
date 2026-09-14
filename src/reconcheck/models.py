@@ -22,11 +22,45 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
-_CURRENCY = "¥$€£"
+_CURRENCY_CHARS = "¥$€£"
+# multi-letter currency codes, longest first (hkd before hk)
+_CURRENCY_CODES = (
+    "usd", "eur", "gbp", "cny", "hkd", "jpy", "aud", "cad", "chf",
+    "sek", "krw", "twd", "sgd", "rmb",
+)
 _NUM_RE = re.compile(
     r"^\s*([+-]?(?:(?:\d[\d,]*)(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*"
     r"([A-Za-z\u4e00-\u9fff%]+)?\s*$"
 )
+
+
+def _strip_currency_prefix(text: str) -> str:
+    """Strip a leading currency marker, keeping the sign: ``-¥12.30``, ``USD 12.30``,
+    ``HK$5``, ``$ 1,200.00`` all reduce to their bare number."""
+    t = text.strip()
+    sign = ""
+    if t and t[0] in "+-":
+        sign, t = t[0], t[1:].strip()
+    changed = True
+    while changed and t:
+        changed = False
+        # symbolic codes glued to the symbol: HK$ / HK ¥
+        if len(t) > 2 and t[:2].upper() == "HK" and t[2] in _CURRENCY_CHARS:
+            t = t[3:].strip()
+            changed = True
+            continue
+        low = t.lower()
+        for code in _CURRENCY_CODES:
+            if low.startswith(code) and (
+                len(low) == len(code) or low[len(code)].isspace()
+            ):
+                t = t[len(code) :].strip()
+                changed = True
+                break
+        if not changed and t and t[0] in _CURRENCY_CHARS:
+            t = t[1:].strip()
+            changed = True
+    return (sign + t) if sign else t
 
 
 class Severity(str, Enum):
@@ -79,11 +113,10 @@ class Cell:
         """Parse ``text`` into a numeric value and an optional unit.
 
         ``"5.00"`` -> value 5.00, unit None; ``"5000 g"`` -> value 5000,
-        unit "g"; ``"¥ 12.30"`` -> value 12.30; anything else -> value None.
+        unit "g"; ``"¥ 12.30"`` / ``"USD 12.30"`` -> value 12.30;
+        anything else -> value None.
         """
-        t = self.text.strip()
-        if t and t[0] in _CURRENCY:
-            t = t[1:].strip()
+        t = _strip_currency_prefix(self.text)
         m = _NUM_RE.match(t)
         if not m:
             self.value = None

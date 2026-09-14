@@ -22,3 +22,23 @@ jobs:
         run: ruff check src tests
       - name: Test
         run: pytest
+      - name: Frontend unit tests
+        run: node --test tests/js/
+      - name: Wheel packs web resources
+        run: |
+          pip wheel . --no-deps -w /tmp/whl
+          python - <<'EOF'
+          import glob, zipfile
+          whl = glob.glob("/tmp/whl/*.whl")[0]
+          names = set(zipfile.ZipFile(whl).namelist())
+          for needed in [
+              "reconcheck/web/static/index.html",
+              "reconcheck/web/static/app.js",
+              "reconcheck/web/static/frontend-core.js",
+              "reconcheck/web/static/style.css",
+              "reconcheck/rules_defaults/base.yaml",
+              "reconcheck/rules_defaults/unit.yaml",
+          ]:
+              assert any(n == needed for n in names), f"missing {needed} in {whl}"
+          print("wheel resources ok")
+          EOF

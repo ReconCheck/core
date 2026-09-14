@@ -10,8 +10,9 @@
 > (CSV / TSV / XLSX) and PDF text layers: point it at a purchase order and an
 > invoice (or a whole PO + delivery note + invoice triple), it parses both,
 > aligns the rows, runs the rules, and emits a JSON report whose every finding
-> cites the exact position in the original file. OCR for scanned documents and
-> real entity resolution are next — watch or star to follow along.
+> cites the exact position in the original file. Scanned-PDF OCR ships as an
+> optional Tesseract backend; real entity resolution is next — watch or star to
+> follow along.
 
 ---
 
@@ -153,13 +154,14 @@ Full capability matrix, end-user guide and cross-engine design: [ReconCheck/docs
 ## Roadmap
 
 - [x] Tabular parsing, row alignment, YAML differential rules (tolerance + exceptions), evidence-chain JSON, CLI
-- [x] PDF text-layer parsing (pdfplumber; scan-only files raise a clear "OCR not wired" error)
+- [x] PDF text-layer parsing (pdfplumber; scan-only files raise a clear error unless the optional OCR backend is enabled)
 - [x] Exception catalogue: unit conversion, rounding, date tolerance (`dates_within`), case-insensitive text equality
 - [x] REST API (`/api/compare`, `/api/compare3`, async `/api/jobs`, reports) + batch-upload web UI with clickable evidence
 - [x] Enterprise data sources: configure custom web APIs, probe, fetch (file stream or records JSON) into the document library
 - [x] Three-way match: purchase order / delivery note / invoice (compare3)
 - [ ] LLM participation (opt-in): alignment disambiguation + finding explanations (interface reserved in `reconcheck/llm`)
-- [ ] OCR for scanned PDFs/images; borderless multi-column layout recovery
+- [x] Optional scanned-PDF OCR — Tesseract via the `pdf-ocr` extra + `RECONCHECK_OCR=1` (per-line text output)
+- [ ] OCR for images; borderless multi-column layout recovery
 - [ ] Cross-document alignment — entity resolution, fuzzy matching, unit normalisation
 - [ ] Differential rule engine — richer exception catalogue (v1 spec freeze next)
 - [ ] Evidence-chain output format — stable v1
@@ -186,7 +188,7 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 它解决的是 ERP 不解决的问题：ERP 负责记账，不负责检查账记的这几份文件之间是否自洽。
 
-> 项目处于中期开发阶段，表格类文件（CSV/TSV/XLSX）与 PDF 文本层的解析、三方核对（compare3）已可用；扫描件 OCR 与实体对齐是下一步。欢迎 Watch / Star 关注进展。
+> 项目处于中期开发阶段，表格类文件（CSV/TSV/XLSX）与 PDF 文本层的解析、三方核对（compare3）已可用；扫描件可选 OCR（`pdf-ocr` 扩展）已接入，实体对齐是下一步。欢迎 Watch / Star 关注进展。
 
 使用方式与功能清单见 [docs 仓库](https://github.com/ReconCheck/docs)：中文《用户使用指南》《功能能力清单》+ 英文 capability list。
 

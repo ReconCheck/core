@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import io
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,9 @@ _DELIMITERS = {".csv": ",", ".tsv": "\t", ".txt": None}
 # reject a decodable-but-garbage candidate when this share of its characters
 # are control characters (random binary bytes hit ~12% in any single-byte path)
 _MAX_NONPRINTABLE_RATIO = 0.10
+# decompression bomb guard: a zip entry's file_size is the uncompressed size,
+# so summing headers rejects a bomb before openpyxl expands it
+_MAX_XLSX_UNCOMPRESSED = 256 * 1024 * 1024
 
 
 def _looks_like_text(text: str, sample: int = 8192) -> bool:
@@ -130,7 +134,25 @@ def _document_from_delimited(p: Path) -> Document:
     return Document(str(p), [table])
 
 
+def _guard_xlsx_zip(p: Path) -> None:
+    """Reject zip bombs before openpyxl expands them.
+
+    ``file_size`` in a zip central directory is the *uncompressed* size, so a
+    tiny file built from huge entries is caught up front (zip-slip / entity
+    expansion DoS guard).
+    """
+    try:
+        with zipfile.ZipFile(p) as zf:
+            total = sum(entry.file_size for entry in zf.infolist())
+    except zipfile.BadZipFile as err:
+        raise UnsupportedFormatError(f"'{p.name}' is not a readable Excel file: {err}") from err
+    if total > _MAX_XLSX_UNCOMPRESSED:
+        cap_mb = _MAX_XLSX_UNCOMPRESSED // 1024 // 1024
+        raise UnsupportedFormatError(f"'{p.name}' uncompresses to more than {cap_mb} MB")
+
+
 def _document_from_xlsx(p: Path, sheet: str | None = None) -> Document:
+    _guard_xlsx_zip(p)
     # read-only streaming keeps memory flat for large sheets; a handful of
     # producers write files the read-only reader refuses, so fall back once
     try:

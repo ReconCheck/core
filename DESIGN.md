@@ -13,7 +13,9 @@ The engine is four stages, in this order:
    Tabular: CSV / TSV / TXT and XLSX / XLSM. PDF (text layer, via the optional
    `pdf` extra): ruling-line tables first, then a layout fallback that clusters
    words into rows/columns; a PDF without extractable text raises
-   `PdfOcrRequiredError` instead of parsing garbage (OCR is a later milestone).
+   `PdfOcrRequiredError` instead of parsing garbage (an optional Tesseract OCR
+   backend activates with `pdf-ocr` + `RECONCHECK_OCR=1`; otherwise the refusal
+   stands).
 2. **Align** — match rows across two tables on one or more key columns
    (`match_on`). Keys are normalised first: part numbers (`A-012` → `a12`),
    legal-suffix stripping for entity names, whitespace. Rows that do not match
@@ -75,9 +77,10 @@ that does not match the PO and delivery note.
 
 ## Current limitations (next phases)
 
-- No OCR for scanned PDFs/images yet (a PDF without a text layer raises a
-  clear error); borderless multi-column layouts rely on the word-clustering
-  fallback and can be imperfect.
+- Scanned-PDF OCR is optional (Tesseract via the `pdf-ocr` extra +
+  `RECONCHECK_OCR=1`, per-line text output); image files remain unsupported, and
+  borderless multi-column layouts rely on the word-clustering fallback and can
+  be imperfect.
 - PDF table detection follows ruling lines first; merged cells inside PDF
   tables collapse to their left value. XLSX merged cells: value read from the
   top-left cell only.
@@ -170,7 +173,8 @@ default) may assist at two seams:
    the model as candidate pairs (`disambiguate`); the engine keeps acceptance
    control (threshold, limits). Design target: `华加` ↔ `深圳市华加生物科技有限公司`.
 2. **Finding narration** — `explain` attaches a natural-language sentence to a
-   finding; findings touched by the model are flagged `llm_augmented`.
+   finding; once a backend lands, model-touched findings will carry a marker
+   field (the report contract has none today).
 
 Guardrails: OpenAI-compatible endpoints only (`base_url` + `api_key` + model,
 operator-configured in the same style as data sources); opt-in per job;

@@ -84,6 +84,15 @@ def _tol(raw: Any, default: str) -> Decimal:
         return Decimal(default)
 
 
+def _read_rule_file(path: Path) -> str:
+    """Read a rule file, falling back to GB18030 when a Windows-spawned file
+    is not valid UTF-8 (previously such configs hard-failed)."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="gb18030")
+
+
 def load_rules(source: str | Path | None = None) -> list[Rule]:
     """Load rules from a YAML file or a directory of ``*.yaml`` files.
 
@@ -104,7 +113,8 @@ def load_rules(source: str | Path | None = None) -> list[Rule]:
     rules: list[Rule] = []
     for f in files:
         try:
-            parsed = yaml.safe_load(f.read_text(encoding="utf-8"))
+            text = _read_rule_file(f)
+            parsed = yaml.safe_load(text)
         except yaml.YAMLError as err:
             raise ValueError(f"invalid rule YAML in '{f}': {err}") from err
         items = parsed if isinstance(parsed, list) else [parsed]

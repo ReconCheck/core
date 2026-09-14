@@ -72,3 +72,13 @@ def test_align_missing_match_on_column_raises():
         raise AssertionError("expected EmptyDocumentError")
     except EmptyDocumentError:
         pass
+
+def test_find_duplicate_keys():
+    from reconcheck.align import find_duplicate_keys
+
+    table = make_table(
+        ["k", "v"],
+        [{"k": "a", "v": "1"}, {"k": "b", "v": "2"}, {"k": "a", "v": "3"}],
+    )
+    assert find_duplicate_keys(table, ["k"]) == ["a"]
+    assert find_duplicate_keys(table, ["v"]) == []

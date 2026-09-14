@@ -186,3 +186,13 @@ def test_threeway_unit_anchor_not_stuck_to_first_doc(tmp_path: Path):
     ]
     report = compare_three(docs, match_on=["k"])
     assert report["three_way"] == []
+
+def test_threeway_duplicate_keys_warn(tmp_path: Path):
+    paths = []
+    for name in ("PO-240913-001.csv", "DN-240913-001.csv", "INV-240913-001.csv"):
+        p = tmp_path / name
+        p.write_text("料号,数量\nX1,1\nX1,2\n", encoding="utf-8")
+        paths.append(p)
+    report = compare_three(_docs(paths), match_on=["料号"])
+    assert any("duplicate" in w for w in report["warnings"])
+    assert report["summary"]["aligned_rows"] > 0  # comparison still ran on the first rows

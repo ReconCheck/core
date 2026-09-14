@@ -108,3 +108,9 @@ def test_pdf_unsupported_without_dependency_is_clear():
     # when pdfplumber is missing the error names the fix; here it is installed,
     # so we only make sure the module import path exists
     import reconcheck.parse.pdf  # noqa: F401 - import smoke
+
+def test_ocr_requested_without_pytesseract(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("RECONCHECK_OCR", "1")
+    pdf = _make_pdf(tmp_path / "scan.pdf", [])  # a page with no text operators
+    with pytest.raises(PdfOcrRequiredError, match="pytesseract"):
+        load_document(pdf)

@@ -355,11 +355,14 @@ def _doc_from_meta(docs: DocumentStore, meta: dict[str, Any]) -> Document:
             records = json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError as err:
             raise ReconCheckError(f"stored records of '{meta['name']}' are corrupt: {err}") from err
-        return document_from_records(records, meta["name"])
-    path = docs.content_path(meta["id"], meta)
-    if path is None:
-        raise ReconCheckError(f"content of document '{meta['name']}' is missing")
-    return load_document(path)
+        doc = document_from_records(records, meta["name"])
+    else:
+        path = docs.content_path(meta["id"], meta)
+        if path is None:
+            raise ReconCheckError(f"content of document '{meta['name']}' is missing")
+        doc = load_document(path)
+    doc.kind = meta.get("kind") or guess_kind(str(meta.get("name") or ""))
+    return doc
 
 
 def _doc_preview(docs: DocumentStore, meta: dict[str, Any]) -> dict[str, Any]:
@@ -446,7 +449,9 @@ class Worker:
             if meta is None:
                 raise ReconCheckError(f"document {entry['doc_id']} no longer exists")
             return _doc_from_meta(self.documents, meta)
-        return load_document(entry["path"])
+        doc = load_document(entry["path"])
+        doc.kind = guess_kind(str(entry.get("name") or entry["path"]))
+        return doc
 
     def _rules_for(self) -> list[Rule]:
         """Configured rules plus the built-in auto rule as a baseline.
@@ -609,6 +614,8 @@ def create_app(
                             out.write(chunk)
                     paths.append(target)
                 docs = [load_document(p) for p in paths]
+                for d in docs:
+                    d.kind = guess_kind(d.path)
             except ReconCheckError as err:
                 raise HTTPException(status_code=422, detail=str(err)) from err
             finally:
@@ -666,6 +673,8 @@ def create_app(
                             out.write(chunk)
                     paths.append(target)
                 docs = [load_document(p) for p in paths]
+                for d in docs:
+                    d.kind = guess_kind(d.path)
             except ReconCheckError as err:
                 raise HTTPException(status_code=422, detail=str(err)) from err
             finally:
@@ -854,7 +863,7 @@ def create_app(
                 data.extend(chunk)
             if not data:
                 raise HTTPException(status_code=422, detail=f"{name}: empty upload")
-            doc_id = documents.register(name, bytes(data), source="upload")
+            doc_id = documents.register(name, bytes(data), source="upload", kind=guess_kind(name))
             meta = documents.get(doc_id)
             if meta is not None:
                 created.append(meta)
@@ -963,12 +972,19 @@ def create_app(
                 name = (record_id or source.name or "records") + ".json"
                 data = json.dumps(records, ensure_ascii=False).encode("utf-8")
                 doc_id = documents.register(
-                    name, data, source="records", datasource_id=ds_id, ext_hint=".json"
+                    name,
+                    data,
+                    source="records",
+                    datasource_id=ds_id,
+                    ext_hint=".json",
+                    kind=guess_kind(name),
                 )
             else:
                 data = source.fetch_bytes(record_id)
                 name = record_id or (Path(source.url.split("?")[0]).name or source.name or "file")
-                doc_id = documents.register(name, data, source="datasource", datasource_id=ds_id)
+                doc_id = documents.register(
+                    name, data, source="datasource", datasource_id=ds_id, kind=guess_kind(name)
+                )
         except HTTPError as err:
             raise HTTPException(status_code=502, detail=f"fetch failed: {err}") from err
         except ValueError as err:  # undecodable JSON from a records endpoint

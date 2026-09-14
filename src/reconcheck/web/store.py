@@ -33,6 +33,7 @@ class DocumentStore:
         source: str = "upload",
         datasource_id: str | None = None,
         ext_hint: str | None = None,
+        kind: str | None = None,
     ) -> str:
         """Store raw bytes and return the new document id."""
         doc_id = uuid.uuid4().hex[:12]
@@ -44,6 +45,7 @@ class DocumentStore:
             "id": doc_id,
             "name": name,
             "ext": ext,
+            "kind": kind or "",
             "source": source,
             "datasource_id": datasource_id,
             "size": len(data),

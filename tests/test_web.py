@@ -355,3 +355,24 @@ def test_create_job_rejects_malformed_config(tmp_path: Path):
     assert _post({"normalize": []}).status_code == 400  # must be a dict
     assert _post({"normalize": {"id": "bogus-kind"}}).status_code == 400
     assert _post({"match_on": ["id"], "normalize": {"id": "part_no"}}).status_code == 200
+
+def test_documents_carry_detected_kind(tmp_path: Path):
+    with _client(tmp_path) as client:
+        with open(PO, "rb") as f:
+            r = client.post("/api/documents", files=[("files", ("PO-240913-001.csv", f, "text/csv"))])
+        assert r.status_code == 200
+        meta = r.json()["documents"][0]
+        assert meta["kind"] == "po"
+
+        with open(PO, "rb") as lf, open(INVOICE, "rb") as rf:
+            r = client.post(
+                "/api/compare",
+                files=[
+                    ("files", ("PO-240913-001.csv", lf, "text/csv")),
+                    ("files", ("INV-240913-001.csv", rf, "text/csv")),
+                ],
+            )
+        assert r.status_code == 200
+        report = r.json()
+        kinds = [d["kind"] for d in report["documents"]]
+        assert kinds == ["po", "invoice"]
